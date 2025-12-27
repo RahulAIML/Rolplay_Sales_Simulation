@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sales AI Config</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+        <h1 class="text-2xl font-bold mb-6 text-center text-blue-600">Connect Sales AI</h1>
+        <p class="mb-6 text-gray-600 text-center">Enable AI coaching for your Outlook meetings.</p>
+
+        <form action="/register" method="post" class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Full Name</label>
+                <input type="text" name="name" placeholder="John Doe" required
+                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Outlook Email</label>
+                <input type="email" name="email" placeholder="john.doe@company.com" required
+                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700">WhatsApp Number</label>
+                <input type="text" name="phone" placeholder="+1234567890" required
+                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+                <p class="text-xs text-gray-500 mt-1">Include country code (e.g., +1...)</p>
+            </div>
+
+            <button type="submit"
+                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                Register for Coaching
+            </button>
+        </form>
+    </div>
+</body>
+
+</html>
