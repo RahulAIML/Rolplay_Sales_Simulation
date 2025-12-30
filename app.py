@@ -88,8 +88,9 @@ def register():
             db.execute_query("INSERT INTO users (email, name, phone) VALUES (?, ?, ?)", (email, name, phone), commit=True)
         
         # Welcome Message
+        bot_email = os.environ.get("BOT_EMAIL", "Rolplaysales.ai@gmail.com")
         msg = (f"🎉 Welcome {name}! You are registered.\n\n"
-               "Invite 'rahulbhattacharyackt@gmail.com' to your meetings to receive coaching.")
+               f"Invite '{bot_email}' to your meetings to receive coaching.")
         whatsapp_service.send_whatsapp_message(phone, msg)
         
         return f"<h1>Success!</h1><p>{name} is registered. Check WhatsApp for confirmation.</p>"
