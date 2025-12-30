@@ -95,7 +95,7 @@ def process_outlook_webhook(data: dict) -> dict:
     if sp_phone:
         coaching = ai_service.generate_coaching_plan(
             meeting_title=meeting.get("title", "Meeting"),
-            client_name=client.get("name", "The Client"),
+            client_name=c_name,
             client_company=client.get("company", "Their Company"),
             start_time=start_dt.strftime("%I:%M %p")
         )
