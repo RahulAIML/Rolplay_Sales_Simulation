@@ -105,7 +105,7 @@ def process_outlook_webhook(data: dict) -> dict:
     # 4. Save Meeting
     mtg_id = meeting.get("meeting_id")
     # ... check exists ...
-    existing_mtg = db.execute_query("SELECT id FROM meetings WHERE meeting_id = ?", (mtg_id,), fetch_one=True)
+    existing_mtg = db.execute_query("SELECT id FROM meetings WHERE outlook_event_id = ?", (mtg_id,), fetch_one=True)
     if existing_mtg:
          logging.info(f"Meeting {mtg_id} already exists. Skipping processing.")
          return {"status": "success", "message": "Meeting already processed"}, 200
@@ -118,8 +118,8 @@ def process_outlook_webhook(data: dict) -> dict:
     end_dt = parse_iso_datetime(end_str) if end_str else datetime.now()
     
     db.execute_query(
-        "INSERT INTO meetings (meeting_id, title, start_time, end_time, client_id, organizer_email) VALUES (?, ?, ?, ?, ?, ?)",
-        (mtg_id, meeting.get("title"), start_dt, end_dt, client_id, org_email),
+        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone) VALUES (?, ?, ?, ?, 'scheduled', ?)",
+        (mtg_id, start_dt, end_dt, client_id, sp_phone),
         commit=True
     )
     
