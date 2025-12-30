@@ -21,17 +21,12 @@ def process_outlook_webhook(data: dict) -> dict:
     client = data.get("client", {})
     
     # Organizer Email (Key for User Lookup)
-    organizer_raw = meeting.get("organizer", {})
-    # Handle if organizer is string or dict (robustness)
-    if isinstance(organizer_raw, str):
-        import json
-        try:
-            org_data = json.loads(organizer_raw)
-            org_email = org_data.get("address")
-        except:
-            org_email = None
+    # New structure: organizer is a dict with {name, email}
+    organizer = meeting.get("organizer", {})
+    if isinstance(organizer, dict):
+        org_email = organizer.get("email") or organizer.get("address")
     else:
-        org_email = organizer_raw.get("address")
+        org_email = None
 
     # 2. Identify Salesperson (User)
     sp_phone = None
@@ -42,14 +37,21 @@ def process_outlook_webhook(data: dict) -> dict:
             logging.info(f"Identified User via Organizer ({org_email}): {sp_phone}")
         else:
             logging.warning(f"Organizer {org_email} not registered. Ignoring meeting for messaging.")
-            # We CONTINUE processing to save to DB, but won't send msg (per rules)
-            # Actually, if we don't message, maybe we shouldn't save? 
-            # Rule: "WhatsApp messages go ONLY to registered users."
-            # We can save it, but set phone to None.
 
     # 3. Save Client
     # Client ID logic
     c_email = client.get("email")
+    
+    # Combine names for DB compatibility
+    first = client.get('first_name')
+    last = client.get('last_name')
+    
+    if first or last:
+        c_name = f"{first or ''} {last or ''}".strip()
+    else:
+        # Fallback to legacy 'name' field
+        c_name = client.get('name', 'Unknown Client')
+    
     c_exist = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
     
     if c_exist:
@@ -57,13 +59,13 @@ def process_outlook_webhook(data: dict) -> dict:
         # Update details
         db.execute_query(
             "UPDATE clients SET name=?, company=?, hubspot_contact_id=? WHERE email=?",
-            (client.get("name"), client.get("company"), client.get("hubspot_contact_id"), c_email),
+            (c_name, client.get("company"), client.get("hubspot_contact_id"), c_email),
             commit=True
         )
     else:
         db.execute_query(
             "INSERT INTO clients (email, name, company, hubspot_contact_id) VALUES (?, ?, ?, ?)",
-            (c_email, client.get("name"), client.get("company"), client.get("hubspot_contact_id")),
+            (c_email, c_name, client.get("company"), client.get("hubspot_contact_id")),
             commit=True
         )
         # Fetch back
