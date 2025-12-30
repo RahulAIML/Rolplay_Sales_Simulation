@@ -17,15 +17,19 @@ def process_outlook_webhook(data: dict) -> dict:
     logging.info(f"Processing Webhook: {data}")
 
     # 1. Parse & Validate
-    meeting = data.get("meeting", {})
-    client = data.get("client") # Do not default to {} yet so we can check None
+    meeting = data.get("meeting")
+    
+    # MANDATORY: Meeting data
+    if not meeting:
+        logging.error("Webhook Error: Missing 'meeting' data in payload.")
+        # Return 200 to stop Make.com retries for bad payloads
+        return {"status": "ignored", "message": "Missing meeting data"}, 200
 
-    # CRITICAL FIX: Guard for missing client
-    if not client: 
-        logging.error("Webhook Error: Missing 'client' data in payload.")
-        # We return early or skip processing
-        return {"status": "error", "message": "Missing client data"}, 400
-
+    # OPTIONAL: Client data
+    client = data.get("client")
+    if not client:
+        logging.info("No client data provided. Proceeding without CRM enrichment.")
+    
     # Organizer Email (Key for User Lookup)
     # New structure: organizer might be dict OR stringified JSON
     organizer = meeting.get("organizer", {})
@@ -57,68 +61,78 @@ def process_outlook_webhook(data: dict) -> dict:
             logging.info(f"Identified User via Organizer ({org_email}): {sp_phone}")
         else:
             logging.warning(f"Organizer {org_email} not registered. Ignoring meeting for messaging.")
-
-    # 3. Save Client
-    # Client ID logic
-    c_email = client.get("email")
-    
-    # Combine names for DB compatibility
-    first = client.get('first_name')
-    last = client.get('last_name')
-    
-    if first or last:
-        c_name = f"{first or ''} {last or ''}".strip()
+            # We return 200 to indicate success to Make.com, but we stop processing
+            return {"status": "ignored", "message": "Organizer not registered"}, 200
     else:
-        # Fallback to legacy 'name' field
-        c_name = client.get('name', 'Valued Client')
-    
-    c_exist = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
-    
-    if c_exist:
-        client_id = c_exist['id']
-        # Update details
-        db.execute_query(
-            "UPDATE clients SET name=?, company=?, hubspot_contact_id=? WHERE email=?",
-            (c_name, client.get("company"), client.get("hubspot_contact_id"), c_email),
-            commit=True
-        )
-    else:
-        db.execute_query(
-            "INSERT INTO clients (email, name, company, hubspot_contact_id) VALUES (?, ?, ?, ?)",
-            (c_email, c_name, client.get("company"), client.get("hubspot_contact_id")),
-            commit=True
-        )
-        # Fetch back
-        res = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
-        client_id = res['id']
+        logging.warning("No organizer email found in meeting data.")
+        return {"status": "ignored", "message": "No organizer email"}, 200
 
-    # 4. Save Meeting (Idempotency Check)
-    sys_id = meeting.get("meeting_id", f"sys_{int(time.time())}")
+    # 3. Save Client (Only if client data exists)
+    client_id = None
+    c_name = "Valued Client" # Default for AI/Meeting
     
-    existing_mtg = db.execute_query("SELECT id FROM meetings WHERE outlook_event_id = ?", (sys_id,), fetch_one=True)
+    if client:
+        c_email = client.get("email")
+        # Combine names for DB compatibility
+        first = client.get('first_name')
+        last = client.get('last_name')
+        
+        if first or last:
+            c_name = f"{first or ''} {last or ''}".strip()
+        else:
+            c_name = client.get('name', 'Valued Client')
+
+        if c_email:
+            c_exist = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
+            
+            if c_exist:
+                client_id = c_exist['id']
+                # Update details
+                db.execute_query(
+                    "UPDATE clients SET name=?, company=?, hubspot_contact_id=? WHERE email=?",
+                    (c_name, client.get("company"), client.get("hubspot_contact_id"), c_email),
+                    commit=True
+                )
+            else:
+                db.execute_query(
+                    "INSERT INTO clients (email, name, company, hubspot_contact_id) VALUES (?, ?, ?, ?)",
+                    (c_email, c_name, client.get("company"), client.get("hubspot_contact_id")),
+                    commit=True
+                )
+                res = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
+                client_id = res['id']
+
+    # 4. Save Meeting
+    mtg_id = meeting.get("meeting_id")
+    # ... check exists ...
+    existing_mtg = db.execute_query("SELECT id FROM meetings WHERE meeting_id = ?", (mtg_id,), fetch_one=True)
     if existing_mtg:
-        logging.info(f"Meeting {sys_id} already exists. Skipping processing.")
-        return {"status": "skipped", "reason": "duplicate"}
+         logging.info(f"Meeting {mtg_id} already exists. Skipping processing.")
+         return {"status": "success", "message": "Meeting already processed"}, 200
 
-    # Time Parsing
-    start_dt = parse_iso_datetime(meeting.get("start_time"))
-    end_dt = parse_iso_datetime(meeting.get("end_time"))
+    start_str = meeting.get("start_time")
+    end_str = meeting.get("end_time")
     
-    # Insert
+    # Parse dates
+    start_dt = parse_iso_datetime(start_str) if start_str else datetime.now()
+    end_dt = parse_iso_datetime(end_str) if end_str else datetime.now()
+    
     db.execute_query(
-        "INSERT INTO meetings (client_id, outlook_event_id, start_time, end_time, status, salesperson_phone) VALUES (?, ?, ?, ?, 'scheduled', ?)",
-        (client_id, sys_id, start_dt.isoformat(), end_dt.isoformat(), sp_phone),
+        "INSERT INTO meetings (meeting_id, title, start_time, end_time, client_id, organizer_email) VALUES (?, ?, ?, ?, ?, ?)",
+        (mtg_id, meeting.get("title"), start_dt, end_dt, client_id, org_email),
         commit=True
     )
     
-    # 5. Trigger AI & Notify (Only if registered user found)
+    # 5. Trigger AI & Notify
+    # Only if we have a salesperson phone (which we checked above)
     if sp_phone:
         coaching = ai_service.generate_coaching_plan(
             meeting_title=meeting.get("title", "Meeting"),
             client_name=c_name,
-            client_company=client.get("company", "Their Company"),
+            client_company=client.get("company", "Their Company") if client else "Their Company",
             start_time=start_dt.strftime("%I:%M %p")
         )
+
         
         # Format Message
         steps_text = "\n".join(f"- {s}" for s in coaching.get("steps", []))

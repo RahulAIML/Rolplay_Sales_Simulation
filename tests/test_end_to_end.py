@@ -255,17 +255,47 @@ class TestEndToEnd(unittest.TestCase):
         mock_send_whatsapp.assert_called()
 
     def test_missing_client_graceful_fail(self):
-        """Test that missing client data returns 400 instead of crashing"""
+        """Test that missing client data proceeds (200 OK) instead of erroring"""
+        
+        # Payload with VALID organizer but NO client
         payload = {
-            "meeting": { "title": "No Client" },
+            "meeting": { 
+                "meeting_id": "no_client_1",
+                "title": "No Client Meeting",
+                "organizer": {"email": "test_struct@user.com"} # Matches integration user
+            }
             # "client" is missing
         }
         
         from services.meeting_service import process_outlook_webhook
-        res, status_code = process_outlook_webhook(payload)
         
-        self.assertEqual(status_code, 400)
-        self.assertIn("Missing client data", res['message'])
+        # Ensure user exists so we don't get "ignored" due to weak organizer
+        # (Re-using 'Integration User' from previous test setup if possible, or insert generic)
+        db.execute_query("INSERT OR IGNORE INTO users (name, email, phone) VALUES (?, ?, ?)", 
+                        ("Integration User", "test_struct@user.com", "whatsapp:+15550000"), commit=True)
+
+        res = process_outlook_webhook(payload)
+        
+        # Should now be success (200 implied if not tuple returned, wait, the function returns a dict usually? 
+        # Actually my code returns (dict, code).
+        # Let's check how I call it: `res = process_outlook_webhook(payload)`
+        # If it returns a tuple, res will be a tuple.
+        # My previous code returned `{"status":...}, code`.
+        
+        # Wait, if I call it directly, I get the tuple.
+        # If I call via flask client, I get response object.
+        # Here I am importing the function and calling it directly.
+        
+        if isinstance(res, tuple):
+            body, code = res
+        else:
+            body, code = res, 200 # Fallback
+            
+        self.assertEqual(code, 200)
+        # It should process successfully (or be ignored if no start time? defaults generated).
+        # It should reach the end.
+        self.assertEqual(body.get('status'), 'success')
+
 
 if __name__ == '__main__':
     unittest.main()
