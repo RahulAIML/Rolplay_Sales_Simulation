@@ -50,7 +50,7 @@ def process_outlook_webhook(data: dict) -> dict:
         c_name = f"{first or ''} {last or ''}".strip()
     else:
         # Fallback to legacy 'name' field
-        c_name = client.get('name', 'Unknown Client')
+        c_name = client.get('name', 'Valued Client')
     
     c_exist = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
     
