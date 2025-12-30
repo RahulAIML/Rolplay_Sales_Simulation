@@ -18,19 +18,39 @@ def process_outlook_webhook(data: dict) -> dict:
 
     # 1. Parse & Validate
     meeting = data.get("meeting", {})
-    client = data.get("client", {})
-    
+    client = data.get("client") # Do not default to {} yet so we can check None
+
+    # CRITICAL FIX: Guard for missing client
+    if not client: 
+        logging.error("Webhook Error: Missing 'client' data in payload.")
+        # We return early or skip processing
+        return {"status": "error", "message": "Missing client data"}, 400
+
     # Organizer Email (Key for User Lookup)
-    # New structure: organizer is a dict with {name, email}
+    # New structure: organizer might be dict OR stringified JSON
     organizer = meeting.get("organizer", {})
+    org_email = None
+
     if isinstance(organizer, dict):
-        org_email = organizer.get("email") or organizer.get("address")
+        raw_email = organizer.get("email") or organizer.get("address")
+        # Check if it looks like a JSON string '{"name":...}'
+        if isinstance(raw_email, str) and raw_email.strip().startswith('{'):
+            try:
+                import json
+                parsed = json.loads(raw_email)
+                org_email = parsed.get("address") or parsed.get("email")
+            except Exception:
+                org_email = raw_email
+        else:
+            org_email = raw_email
     else:
-        org_email = None
+        # Fallback if organizer itself is a string/other
+        org_email = str(organizer)
 
     # 2. Identify Salesperson (User)
     sp_phone = None
     if org_email:
+        # Try finding exact match first
         user = db.execute_query("SELECT phone FROM users WHERE email = ?", (org_email,), fetch_one=True)
         if user:
             sp_phone = user['phone']
