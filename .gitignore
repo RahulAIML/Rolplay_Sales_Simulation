@@ -28,6 +28,7 @@ sales_coach_blueprint.json
 tests/
 test_*.log
 *.txt
+!requirements.txt
 DB_Inspect.py
 
 # Keep Documentation but exclude others
