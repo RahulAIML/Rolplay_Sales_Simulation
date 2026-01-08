@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: sales-coach
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sales-coach-db
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_FROM
+        sync: false
+      - key: ADMIN_WHATSAPP_TO
+        sync: false
+      - key: HUBSPOT_ACCESS_TOKEN
+        sync: false
+
+databases:
+  - name: sales-coach-db
+    plan: free
+    databaseName: coachlink
+    user: coach_user

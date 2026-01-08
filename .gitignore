@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+*.db
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Deployment - Exclude Non-Essential
+verify_deployment.py
+verify_output.txt
+test_*.py
+test_output.txt
+fix_*.py
+inspect_*.py
+app.log
+*.md
+.env.example
+sales_coach_blueprint.json
+.env
+
+# Explicitly ignore tests directory
+tests/
+test_*.log
+*.txt
+DB_Inspect.py
+
+# Keep Documentation but exclude others
+!PROJECT_DOCUMENTATION.md
+!MANAGER_SETUP.md
+!DEPLOYMENT_GUIDE_ADMIN.md
+!README.md
