@@ -1,10 +1,9 @@
 import logging
 import os
-import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from database import db
 from utils import normalize_phone, parse_iso_datetime
-from services import ai_service, whatsapp_service, hubspot_service
+from services import ai_service, whatsapp_service, hubspot_service, transcript_service
 
 # Constants
 ADMIN_WHATSAPP_TO = os.getenv("ADMIN_WHATSAPP_TO")
@@ -33,45 +32,33 @@ def process_outlook_webhook(data: dict) -> dict:
     # Organizer Email (Key for User Lookup)
     organizer = meeting.get("organizer", {})
     org_email = None
-    
-    logging.info(f"[DEBUG] Organizer Type: {type(organizer)}")
-    logging.info(f"[DEBUG] Organizer Value: {organizer}")
-    logging.info(f"[DEBUG] DB Mode: {'Postgres' if db.is_postgres else 'SQLite'}")
 
     if isinstance(organizer, dict):
-        logging.info("[DEBUG] Organizer is dict")
         raw_email = organizer.get("email") or organizer.get("address")
         # Check if it looks like a JSON string '{"name":...}'
         if isinstance(raw_email, str) and raw_email.strip().startswith('{'):
-            logging.info("[DEBUG] raw_email looks like JSON")
             try:
                 import json
                 parsed = json.loads(raw_email)
                 org_email = parsed.get("address") or parsed.get("email") or parsed.get("emailAddress", {}).get("address")
-                logging.info(f"[DEBUG] Parsed email from raw_email: {org_email}")
             except Exception as e:
-                logging.error(f"[DEBUG] JSON parse error (raw_email): {e}")
+                logging.error(f"JSON parse error (raw_email): {e}")
                 org_email = raw_email
         else:
             org_email = raw_email
     elif isinstance(organizer, str):
-        logging.info("[DEBUG] Organizer is string")
         clean_org = organizer.strip()
         if clean_org.startswith('{'):
-            logging.info("[DEBUG] Organizer starts with {")
             try:
                 import json
                 parsed = json.loads(clean_org)
                 org_email = parsed.get("address") or parsed.get("email") or parsed.get("emailAddress", {}).get("address")
-                logging.info(f"[DEBUG] Parsed email from organizer string: {org_email}")
             except Exception as e:
-                logging.error(f"[DEBUG] JSON parse error (organizer string): {e}")
+                logging.error(f"JSON parse error (organizer string): {e}")
                 org_email = organizer
         else:
-             logging.info("[DEBUG] Organizer does not start with {")
              org_email = str(organizer)
     else:
-        logging.info("[DEBUG] Organizer is other type")
         # Fallback if organizer itself is a string/other
         org_email = str(organizer)
 
@@ -210,7 +197,6 @@ def process_read_ai_webhook(data: dict):
     ) or []
     
     matched_meeting = None
-    from datetime import timedelta
     
     for m in candidates:
         try:
@@ -296,7 +282,7 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     reply = ai_service.generate_chat_reply(context, message_body)
     return reply
 
-from services import transcript_service
+
 
 def process_transcript_webhook(data: dict):
     """
@@ -325,7 +311,8 @@ def process_transcript_webhook(data: dict):
         fetch_all=True
     ) or []
     
-    from datetime import timedelta
+
+    
     matched_meeting = None
     
     for m in candidates:

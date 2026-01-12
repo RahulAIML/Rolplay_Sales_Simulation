@@ -1,4 +1,3 @@
-import os
 import logging
 import pytz
 from dateutil import parser

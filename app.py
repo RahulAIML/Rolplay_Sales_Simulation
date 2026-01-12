@@ -8,9 +8,11 @@ load_dotenv()
 from twilio.twiml.messaging_response import MessagingResponse
 
 from database import db
-from services import meeting_service, whatsapp_service, ai_service
+from services import meeting_service, whatsapp_service, ai_service, parsing_service
 from utils import normalize_phone
 import scheduler
+import json
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -19,11 +21,8 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# Initialize DB & Scheduler
 db.init_db()
 scheduler.start_scheduler()
-
-# 2. Routes
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -91,14 +90,12 @@ def register():
         
         phone = normalize_phone(raw_phone)
         
-        # Upsert User
         existing = db.execute_query("SELECT email FROM users WHERE email = ?", (email,), fetch_one=True)
         if existing:
             db.execute_query("UPDATE users SET name = ?, phone = ? WHERE email = ?", (name, phone, email), commit=True)
         else:
             db.execute_query("INSERT INTO users (email, name, phone) VALUES (?, ?, ?)", (email, name, phone), commit=True)
         
-        # Welcome Message
         bot_email = os.getenv("BOT_EMAIL", "bhattacharyabuddhadeb@outlook.com")
         msg = (f"🎉 Welcome {name}! You are registered.\n\n"
                f"Invite '{bot_email}' to your meetings to receive coaching.")
@@ -159,6 +156,55 @@ def readai_ingest_webhook():
         logging.error(f"ReadAI Ingest Error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route('/api/ingest-raw-meeting', methods=['POST'])
+def ingest_raw_meeting():
+    data = request.json
+    if not data or 'raw_text' not in data:
+        return jsonify({"error": "Missing raw_text field"}), 400
+        
+    raw_text = data['raw_text']
+    
+    try:
+        parsed = parsing_service.parse_raw_meeting_text(raw_text)
+        session_id = parsed.get('session_id')
+        transcript = parsed.get('transcript')
+        summary = parsed.get('summary')
+        
+        if not session_id:
+            return jsonify({"error": "Could not extract session_id"}), 400
+            
+        existing = db.execute_query(
+            "SELECT id FROM meeting_coaching WHERE session_id = ?", 
+            (session_id,), 
+            fetch_one=True
+        )
+        
+        if existing:
+            db.execute_query(
+                "UPDATE meeting_coaching SET transcript = ?, summary = ? WHERE session_id = ?",
+                (transcript, summary, session_id),
+                commit=True
+            )
+        else:
+            db.execute_query(
+                "INSERT INTO meeting_coaching (session_id, transcript, summary, source) VALUES (?, ?, ?, ?)",
+                (session_id, transcript, summary, "raw_ingest"),
+                commit=True
+            )
+            
+        return jsonify({
+            "status": "success",
+            "session_id": session_id,
+            "extracted_data": {
+                "summary_length": len(summary) if summary else 0,
+                "transcript_length": len(transcript) if transcript else 0
+            }
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Raw Ingest Error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route('/api/post-meeting-coaching', methods=['POST'])
 def post_meeting_coaching_endpoint():
@@ -171,12 +217,10 @@ def post_meeting_coaching_endpoint():
     title = data.get("title", "Untitled Session")
     source = data.get("source", "read.ai")
     
-    # 1. Validate
     if not session_id or not transcript:
         return jsonify({"error": "Missing session_id or transcript"}), 400
         
     try:
-        # 2. Store Transcript (Upsert)
         # Check existing
         existing = db.execute_query("SELECT id FROM meeting_coaching WHERE session_id = ?", (session_id,), fetch_one=True)
         

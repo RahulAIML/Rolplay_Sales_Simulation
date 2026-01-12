@@ -1,7 +1,6 @@
 import requests
 import logging
 import re
-from datetime import datetime
 from database import db
 
 def fetch_transcript(url: str) -> str:

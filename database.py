@@ -145,6 +145,7 @@ class DBHandler:
                   transcript TEXT NOT NULL,
                   source TEXT,
                   coaching JSONB,
+                  summary TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """
@@ -208,13 +209,14 @@ class DBHandler:
 
             create_coaching_sql = """
                 CREATE TABLE IF NOT EXISTS meeting_coaching (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  session_id TEXT UNIQUE NOT NULL,
-                  title TEXT,
-                  transcript TEXT NOT NULL,
-                  source TEXT,
-                  coaching TEXT,
-                  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT UNIQUE NOT NULL,
+                    title TEXT,
+                    transcript TEXT NOT NULL,
+                    source TEXT,
+                    coaching TEXT,
+                    summary TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
             """
 
@@ -281,6 +283,10 @@ class DBHandler:
                         
                 for cmd in alter_cmds:
                     cur.execute(cmd)
+                
+                # Add summary column to meeting_coaching
+                self._add_summary_column_to_coaching(cur)
+                
                 conn.commit()
                 
             except Exception as e:
@@ -290,6 +296,19 @@ class DBHandler:
             logging.error(f"Init DB Error: {e}")
         finally:
             conn.close()
+
+    def _add_summary_column_to_coaching(self, cur):
+        """Helper to safely add summary column to meeting_coaching if missing."""
+        try:
+            if self.is_postgres:
+                cur.execute("ALTER TABLE meeting_coaching ADD COLUMN IF NOT EXISTS summary TEXT")
+            else:
+                cur.execute("PRAGMA table_info(meeting_coaching)")
+                cols = [row['name'] for row in cur.fetchall()]
+                if 'summary' not in cols:
+                     cur.execute("ALTER TABLE meeting_coaching ADD COLUMN summary TEXT")
+        except Exception as e:
+            logging.warning(f"Could not add summary column to meeting_coaching: {e}")
 
 # Singleton shared instance
 db = DBHandler()
