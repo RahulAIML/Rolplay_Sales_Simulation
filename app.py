@@ -216,7 +216,19 @@ def ingest_raw_meeting():
                 target_phone = u['phone']
                 logging.info(f"Targeting Owner: {owner_email} -> {target_phone}")
         
-        # B. Fallback: First Registered User
+        if not target_phone:
+            # 2. Try matching with existing meetings (Best effort by time or similar logic if session_id stored?)
+            # Since we don't store session_id in 'meetings' table directly usually, we rely on time matching or if we added columns.
+            # But wait! We added logic in 'meeting_service.py' to match Read AI webhooks. 
+            # Ideally the raw ingest should link to the meeting too.
+            
+            # Let's try to match by roughly "now" or if the user passed time? 
+            # The raw text doesn't explicitly have time easy to parse unless we add it.
+            
+            # Fallback: Check if ANY meeting exists for this owner email today? 
+            pass
+            
+        # C. Fallback: First Registered User
         if not target_phone:
             logging.info("Owner not found or not registered. Falling back to first user.")
             user = db.execute_query("SELECT phone FROM users LIMIT 1", fetch_one=True)
