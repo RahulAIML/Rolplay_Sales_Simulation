@@ -277,7 +277,12 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     client = db.execute_query("SELECT name, company FROM clients WHERE id = ?", (m['client_id'],), fetch_one=True)
     c_name = client['name'] if client else "the client"
     
+    # Try to fetch transcript/summary from meets
+    summary_context = m.get('summary', '')
+
     context = f"Salesperson is meeting with {c_name} from {client['company'] if client else 'Unknown'}."
+    if summary_context:
+        context += f"\n\nMeeting Summary: {summary_context[:2000]}"
     
     reply = ai_service.generate_chat_reply(context, message_body)
     return reply

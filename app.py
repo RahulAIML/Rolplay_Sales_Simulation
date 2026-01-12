@@ -228,12 +228,20 @@ def ingest_raw_meeting():
             # This is a reasonable assumption for the "Live" flow: You just finished a meeting, now you are processing it.
             
             recent_mtg = db.execute_query(
-                "SELECT salesperson_phone FROM meetings WHERE status IN ('scheduled', 'reminder_sent') ORDER BY id DESC LIMIT 1",
+                "SELECT id, salesperson_phone FROM meetings WHERE status IN ('scheduled', 'reminder_sent') ORDER BY id DESC LIMIT 1",
                 fetch_one=True
             )
             if recent_mtg and recent_mtg['salesperson_phone']:
                 target_phone = recent_mtg['salesperson_phone']
                 logging.info(f"Targeting Recent Meeting Owner: {target_phone}")
+                
+                # --- NEW: Link Ingested Summary to this Meeting so Chat works ---
+                if summary:
+                    db.execute_query(
+                        "UPDATE meetings SET summary = ? WHERE id = ?",
+                        (summary, recent_mtg['id']),
+                        commit=True
+                    )
             
         # C. Fallback: First Registered User
         if not target_phone:
