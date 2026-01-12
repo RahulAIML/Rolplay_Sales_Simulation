@@ -28,6 +28,11 @@ def parse_raw_meeting_text(raw_text):
     req_session = re.search(r"session_id\s*[:\-]\s*([A-Za-z0-9_-]+)", clean_text, re.IGNORECASE)
     if req_session:
         result["session_id"] = req_session.group(1).strip()
+
+    # 1.1 Extract Owner Email
+    req_owner = re.search(r"owner\s*[:\-]\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", clean_text, re.IGNORECASE)
+    if req_owner:
+        result["owner_email"] = req_owner.group(1).strip().lower()
         
     # 2. Sequential Parsing
     lines = clean_text.split('\n')

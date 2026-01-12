@@ -173,6 +173,7 @@ def ingest_raw_meeting():
         if not session_id:
             return jsonify({"error": "Could not extract session_id"}), 400
             
+
         existing = db.execute_query(
             "SELECT id FROM meeting_coaching WHERE session_id = ?", 
             (session_id,), 
@@ -191,10 +192,57 @@ def ingest_raw_meeting():
                 (session_id, transcript, summary, "raw_ingest"),
                 commit=True
             )
-            
+        
+        # --- NEW: Generate Coaching & Notify ---
+        # 1. Generate Coaching
+        coaching_json = ai_service.generate_sales_coaching(transcript)
+        
+        # 2. Save Coaching
+        coaching_str = json.dumps(coaching_json)
+        db.execute_query(
+            "UPDATE meeting_coaching SET coaching = ? WHERE session_id = ?",
+            (coaching_str, session_id),
+            commit=True
+        )
+        
+        # 3. Notify User
+        target_phone = None
+        
+        # A. Try Owner Email from Parse
+        owner_email = parsed.get('owner_email')
+        if owner_email:
+            u = db.execute_query("SELECT phone FROM users WHERE email = ?", (owner_email,), fetch_one=True)
+            if u:
+                target_phone = u['phone']
+                logging.info(f"Targeting Owner: {owner_email} -> {target_phone}")
+        
+        # B. Fallback: First Registered User
+        if not target_phone:
+            logging.info("Owner not found or not registered. Falling back to first user.")
+            user = db.execute_query("SELECT phone FROM users LIMIT 1", fetch_one=True)
+            if user:
+                target_phone = user['phone']
+
+        if target_phone:
+            # Format minimal message
+            scenario = coaching_json.get("scenario", "General")
+            steps = "\n".join([f"- {s}" for s in coaching_json.get("steps", [])[:3]])
+            msg = (
+                f"🚀 *New Coaching Ready*\n"
+                f"Ref: {session_id}\n\n"
+                f"🎯 *Scenario*: {scenario}\n"
+                f"💡 *Tips*:\n{steps}\n\n"
+                f"Check dashboard for full details."
+            )
+            whatsapp_service.send_whatsapp_message(target_phone, msg)
+            logging.info(f"Sent raw ingest coaching to {target_phone}")
+        else:
+            logging.warning("No user found to notify for raw ingest.")
+
         return jsonify({
             "status": "success",
             "session_id": session_id,
+            "notified": bool(target_phone),
             "extracted_data": {
                 "summary_length": len(summary) if summary else 0,
                 "transcript_length": len(transcript) if transcript else 0
