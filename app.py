@@ -217,16 +217,23 @@ def ingest_raw_meeting():
                 logging.info(f"Targeting Owner: {owner_email} -> {target_phone}")
         
         if not target_phone:
-            # 2. Try matching with existing meetings (Best effort by time or similar logic if session_id stored?)
-            # Since we don't store session_id in 'meetings' table directly usually, we rely on time matching or if we added columns.
-            # But wait! We added logic in 'meeting_service.py' to match Read AI webhooks. 
-            # Ideally the raw ingest should link to the meeting too.
+            # 2. Try matching with existing meetings via Read AI URL or similar metadata if present in summary/text
+            # This handles the case where Pre-Meeting coaching happened, creating a 'meetings' record.
+            # We want to match this new transcript to THAT meeting to get the correct salesperson logic.
             
-            # Let's try to match by roughly "now" or if the user passed time? 
-            # The raw text doesn't explicitly have time easy to parse unless we add it.
+            # Simple Heuristic: Check if 'read_ai_url' (if parsed) matches any meeting
+            # Or if we can fuzzy match by time (hard without explicit time in raw text)
             
-            # Fallback: Check if ANY meeting exists for this owner email today? 
-            pass
+            # For now, let's look for the MOST RECENT meeting that is in 'scheduled' state
+            # This is a reasonable assumption for the "Live" flow: You just finished a meeting, now you are processing it.
+            
+            recent_mtg = db.execute_query(
+                "SELECT salesperson_phone FROM meetings WHERE status IN ('scheduled', 'reminder_sent') ORDER BY id DESC LIMIT 1",
+                fetch_one=True
+            )
+            if recent_mtg and recent_mtg['salesperson_phone']:
+                target_phone = recent_mtg['salesperson_phone']
+                logging.info(f"Targeting Recent Meeting Owner: {target_phone}")
             
         # C. Fallback: First Registered User
         if not target_phone:
