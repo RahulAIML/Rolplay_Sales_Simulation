@@ -224,14 +224,16 @@ def ingest_raw_meeting():
                 target_phone = user['phone']
 
         if target_phone:
-            # Format minimal message
-            scenario = coaching_json.get("scenario", "General")
-            steps = "\n".join([f"- {s}" for s in coaching_json.get("steps", [])[:3]])
+            # Format message with strengths/weaknesses
+            strengths = "\n".join([f"✅ {s}" for s in coaching_json.get("strengths", [])[:2]])
+            weaknesses = "\n".join([f"⚠️ {w}" for w in coaching_json.get("weaknesses", [])[:2]])
+            tips = "\n".join([f"💡 {t}" for t in coaching_json.get("recommended_actions", [])[:2]])
+            
             msg = (
-                f"🚀 *New Coaching Ready*\n"
-                f"Ref: {session_id}\n\n"
-                f"🎯 *Scenario*: {scenario}\n"
-                f"💡 *Tips*:\n{steps}\n\n"
+                f"🚀 *Post-Meeting Coaching ({session_id})*\n\n"
+                f"*Strengths*:\n{strengths}\n\n"
+                f"*Improvements*:\n{weaknesses}\n\n"
+                f"*Action Plan*:\n{tips}\n\n"
                 f"Check dashboard for full details."
             )
             whatsapp_service.send_whatsapp_message(target_phone, msg)
