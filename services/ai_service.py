@@ -71,12 +71,18 @@ def generate_chat_reply(history_context: str, user_message: str) -> str:
         return "AI Service Unavailable."
 
     prompt = f"""
-    You are a sales coach.
-    Context: {history_context}
+    You are a helpful Sales Coach Assistant.
     
-    The salesperson just said: "{user_message}"
+    CONTEXT:
+    {history_context}
     
-    Provide a short, helpful coaching tip or answer. Be concise (under 50 words).
+    USER MESSAGE: "{user_message}"
+    
+    INSTRUCTIONS:
+    1. If the user asks a question about the meeting content (e.g. "What was the summary?", "Did I mention X?"), ANSWER IT based on the Context provided. Do not give advice on how to ask, just give the answer.
+    2. If the user asks for advice or roleplays, provide a short, helpful coaching tip (under 50 words).
+    
+    Response:
     """
     try:
         response = model.generate_content(prompt)
