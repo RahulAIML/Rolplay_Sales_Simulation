@@ -1,7 +1,7 @@
 # ROLPLAY Sales Automation - Project Documentation
 
 ## 1. Executive Summary
-**ROLPLAY Sales Automation** (also known as Sales Coach AI) is an intelligent system designed to assist salespeople by providing real-time, AI-driven coaching before and after client meetings. It integrates seamlessly with **Outlook Calendar**, **WhatsApp**, **HubSpot CRM**, and **Google Gemini AI** to deliver personalized coaching plans, automated reminders, and effortless data entry.
+**ROLPLAY Sales Automation** (also known as Coachlink360) is an intelligent system designed to assist salespeople by providing real-time, AI-driven coaching before and after client meetings. It integrates seamlessly with **Outlook Calendar**, **WhatsApp**, **HubSpot CRM**, and **Google Gemini AI** to deliver personalized coaching plans, automated reminders, and effortless data entry.
 
 The system is designed to be "invisible" to the end-user setup, allowing managers to onboard simply by registering their details, after which the system works automatically by being invited to calendar events.
 

@@ -56,6 +56,15 @@ def parse_raw_meeting_text(raw_text):
             # But we have no safe way to split without data loss. We will use the full prefix as session_id for now.
             result["session_id"] = prefix.strip()
 
+    # --- FALLBACK (For Demo/testing): If no Session ID found, generate one ---
+    if not result["session_id"] and lines:
+        import uuid
+        import time
+        # Generate a unique ID so the flow doesn't block
+        fallback_id = f"demo_session_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+        result["session_id"] = fallback_id
+
+
     parsed_transcript = []
     summary_buffer = []
     
