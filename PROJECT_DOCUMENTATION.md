@@ -148,7 +148,37 @@ The project includes a `render.yaml` Blueprint for Infrastructure-as-Code deploy
 
 ---
 
-## 7. Database Schema
+## 7. Post-Meeting / Read.ai Integration
+
+The system now supports post-meeting analysis via Read.ai integration.
+
+### Flow
+1. **Meeting Ends**: Read.ai generates a transcript.
+2. **Make.com**: A scenario triggers and pushes the raw transcript to `/api/ingest-raw-meeting`.
+3. **Parsing**: The API automatically handles Make.com's "concatenated" text format (Session ID + Speaker Names) using smart prefix detection.
+4. **Coaching**: The AI analyzes the transcript for Strengths, Weaknesses, and Actionable Tips.
+5. **Notification**: A WhatsApp message is sent to the salesperson (matched by Organizer Email or recent Active Meeting).
+
+### Endpoints
+#### `POST /api/ingest-raw-meeting`
+*   **Payload (JSON)**:
+    ```json
+    {
+        "raw_text": "12345SpeakerA: Hello..."
+    }
+    ```
+*   **Response**:
+    ```json
+    {
+        "status": "success",
+        "session_id": "12345",
+        "notified": true
+    }
+    ```
+
+---
+
+## 8. Database Schema
 
 ### `users`
 Stores registered salespeople.

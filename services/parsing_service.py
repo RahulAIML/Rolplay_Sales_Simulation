@@ -35,18 +35,33 @@ def parse_raw_meeting_text(raw_text):
         result["owner_email"] = req_owner.group(1).strip().lower()
         
     # 2. Sequential Parsing
-    lines = clean_text.split('\n')
+    lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
     
-    mode = "scan" # scan, summary, speaker
-    
+    # --- HEURISTIC: Longest Common Prefix for Session ID ---
+    # If no session_id found and lines exist, try to find a common prefix (e.g. "12345SpeakerA: ...")
+    prefix = ""
+    if not result["session_id"] and len(lines) > 1:
+        # Simple LCP
+        s1 = min(lines)
+        s2 = max(lines)
+        for i, c in enumerate(s1):
+            if c != s2[i]:
+                prefix = s1[:i]
+                break
+            else:
+                prefix = s1 # if complete match (unlikely for different lines)
+        
+        if prefix and len(prefix) > 3: # arbitrary sanity check
+            # Heuristic: If prefix ends in "Speaker" or "Participant", it might be capturing the name.
+            # But we have no safe way to split without data loss. We will use the full prefix as session_id for now.
+            result["session_id"] = prefix.strip()
+
     parsed_transcript = []
     summary_buffer = []
     
+    mode = "scan" # scan, summary, speaker
+
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-            
         # Check for Session ID line (skip)
         if re.match(r"^session_id\s*[:\-]", line, re.IGNORECASE):
             mode = "scan"
@@ -59,9 +74,14 @@ def parse_raw_meeting_text(raw_text):
             if content:
                 summary_buffer.append(content)
             continue
+        
+        # --- Handle Prefix Stripping ---
+        processed_line = line
+        if prefix and line.startswith(prefix):
+             processed_line = line[len(prefix):].strip()
             
         # Check for Speaker Pattern: "Name: Text"
-        speaker_match = re.match(r"^([A-Za-z0-9 _'.-]+?)\s*:\s*(.*)", line)
+        speaker_match = re.match(r"^([A-Za-z0-9 _'.-]+?)\s*:\s*(.*)", processed_line)
         
         is_reserved_key = False
         if speaker_match:
