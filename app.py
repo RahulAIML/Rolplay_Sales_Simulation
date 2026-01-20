@@ -84,9 +84,9 @@ def setup_page():
 @app.route('/register', methods=['POST'])
 def register():
     try:
-        name = request.form.get("name")
-        email = request.form.get("email")
-        raw_phone = request.form.get("phone")
+        name = request.form.get("name", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        raw_phone = request.form.get("phone", "")
         
         phone = normalize_phone(raw_phone)
         
