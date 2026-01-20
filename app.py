@@ -256,6 +256,20 @@ def ingest_raw_meeting():
                 logging.info(f"Targeting Owner: {owner_email} -> {target_phone}")
         
         if not target_phone:
+            # B1. Try matching Speaker Names to Registered Users (Fuzzy/Exact)
+            speaker_blocks = parsed.get("speaker_blocks", [])
+            unique_speakers = set(b.get("speaker", "").lower() for b in speaker_blocks if b.get("speaker"))
+            
+            if unique_speakers:
+                # Get all users to check against
+                all_users = db.execute_query("SELECT name, phone FROM users")
+                for u in all_users:
+                    if u['name'] and u['name'].lower() in unique_speakers:
+                        target_phone = u['phone']
+                        logging.info(f"Targeting Matched Speaker: {u['name']} -> {target_phone}")
+                        break
+
+        if not target_phone:
             # B. Try matching with recent meeting
             recent_mtg = db.execute_query(
                 "SELECT id, salesperson_phone FROM meetings WHERE status IN ('scheduled', 'reminder_sent') ORDER BY id DESC LIMIT 1",
