@@ -18,14 +18,38 @@ def process_outlook_webhook(data: dict) -> dict:
     # 1. Parse & Validate
     meeting = data.get("meeting")
     
+    # Fallback for Make.com "Meeting Payload" structure
+    if not meeting:
+        meeting = data.get("Meeting Payload")
+
+    # Normalize keys if meeting found (Handle "Start time" -> "start_time", "Title" -> "title")
+    if meeting:
+        # Create a normalized copy of the dictionary
+        normalized = {}
+        for k, v in meeting.items():
+            # Convert "Start time" -> "start_time", "Title" -> "title"
+            new_key = k.lower().replace(" ", "_")
+            normalized[new_key] = v
+        meeting = normalized
+
     # MANDATORY: Meeting data
     if not meeting:
-        logging.error("Webhook Error: Missing 'meeting' data in payload.")
+        logging.error(f"Webhook Error: Missing 'meeting' data in payload. Received keys: {list(data.keys())}")
         # Return 200 to stop Make.com retries for bad payloads
         return {"status": "ignored", "message": "Missing meeting data"}, 200
 
     # OPTIONAL: Client data
     client = data.get("client")
+    if not client:
+        client = data.get("Client")
+    
+    if client:
+        # Normalize client keys (e.g. "Email" -> "email", "First name" -> "first_name")
+        curr_client = {}
+        for k, v in client.items():
+            curr_client[k.lower().replace(" ", "_")] = v
+        client = curr_client
+
     if not client:
         logging.info("No client data provided. Proceeding without CRM enrichment.")
     
