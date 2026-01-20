@@ -36,8 +36,24 @@ def parse_raw_meeting_text(raw_text):
         
     # 2. Sequential Parsing
     lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
-    
-    # --- HEURISTIC: Longest Common Prefix for Session ID ---
+
+    # --- SPECIFIC FIX: text aggregator often concatenates ID+Name (e.g. 01KF...Rahul:) ---
+    # Check if lines start with a potential ULID (26 chars) or UUID (36 chars) followed immediately by text
+    if lines and not result["session_id"]:
+        first_line = lines[0]
+        # ULID-like (26 chars alphanumeric) or UUID-like
+        # We look for a pattern at start of line that looks like an ID
+        id_match = re.match(r"^([A-Z0-9]{26}|[a-f0-9-]{36})", first_line, re.IGNORECASE)
+        
+        if id_match:
+            potential_id = id_match.group(1)
+            # Verify if this prefix is present in most lines (heuristic to confirm it's an ID, not just random text)
+            match_count = sum(1 for line in lines if line.startswith(potential_id))
+            if match_count > len(lines) * 0.5 or len(lines) == 1:
+                result["session_id"] = potential_id
+                # STRIP IT from all lines
+                lines = [line[len(potential_id):].strip() for line in lines]
+
     # If no session_id found and lines exist, try to find a common prefix (e.g. "12345SpeakerA: ...")
     prefix = ""
     if not result["session_id"] and len(lines) > 1:
