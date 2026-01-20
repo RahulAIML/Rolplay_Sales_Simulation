@@ -163,6 +163,9 @@ def ingest_raw_meeting():
     # For now, let's assume raw_text is primary, but be gentle.
     raw_text = data.get('raw_text', "")
     
+    logging.info(f"Ingest Raw Text Length: {len(raw_text)}")
+    logging.info(f"Ingest Raw Text Snippet: {raw_text[:200]}")
+    
     if not raw_text:
         logging.warning("Ingest received empty raw_text")
     
