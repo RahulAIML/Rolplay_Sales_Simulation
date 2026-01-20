@@ -90,7 +90,8 @@ def parse_raw_meeting_text(raw_text):
              processed_line = line[len(prefix):].strip()
             
         # Check for Speaker Pattern: "Name: Text"
-        speaker_match = re.match(r"^([A-Za-z0-9 _'.-]+?)\s*:\s*(.*)", processed_line)
+        # Relaxed Regex: Look for anything ending in a colon at the start of the line
+        speaker_match = re.match(r"^([^:\n]{1,50})\s*:\s*(.*)", processed_line)
         
         is_reserved_key = False
         if speaker_match:
@@ -115,11 +116,18 @@ def parse_raw_meeting_text(raw_text):
         if mode == "summary":
             summary_buffer.append(line)
         elif mode == "speaker":
+            # Continuation of previous speaker
             if parsed_transcript:
                 parsed_transcript[-1] += f" {line}"
             if result["speaker_blocks"]:
                 result["speaker_blocks"][-1]["text"] += f" {line}"
-                
+        else:
+            # Fallback: If we assume "scan" mode but encounter text that isn't metadata, 
+            # might be unstructured transcript lines.
+            if not parsed_transcript and len(line) > 5:
+                 # Treat as anonymous speaker or just text
+                 parsed_transcript.append(line)
+
     result["transcript"] = "\n".join(parsed_transcript)
     if summary_buffer:
         result["summary"] = "\n".join(summary_buffer)
