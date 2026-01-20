@@ -96,7 +96,7 @@ def register():
         else:
             db.execute_query("INSERT INTO users (email, name, phone) VALUES (?, ?, ?)", (email, name, phone), commit=True)
         
-        bot_email = os.getenv("BOT_EMAIL", "bhattacharyabuddhadeb@outlook.com")
+        bot_email = os.getenv("BOT_EMAIL", "coachlink360@outlook.com")
         msg = (f"🎉 Welcome {name}! You are registered.\n\n"
                f"Invite '{bot_email}' to your meetings to receive coaching.")
         whatsapp_service.send_whatsapp_message(phone, msg)
