@@ -159,15 +159,14 @@ def readai_ingest_webhook():
 @app.route('/api/ingest-raw-meeting', methods=['POST'])
 def ingest_raw_meeting():
     data = request.json or {}
-    # RELAXED CHECK: If no raw_text, try to continue with empty string or check other fields?
-    # For now, let's assume raw_text is primary, but be gentle.
-    raw_text = data.get('raw_text', "")
+    # RELAXED CHECK: Support multiple key variations
+    raw_text = data.get('raw_text') or data.get('Raw text') or data.get('text') or ""
     
     logging.info(f"Ingest Raw Text Length: {len(raw_text)}")
     logging.info(f"Ingest Raw Text Snippet: {raw_text[:200]}")
     
     if not raw_text:
-        logging.warning("Ingest received empty raw_text")
+        logging.warning(f"Ingest received empty raw_text. Keys received: {list(data.keys())}")
     
     session_id = None
     transcript = ""
