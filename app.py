@@ -261,12 +261,13 @@ def ingest_raw_meeting():
             
             if unique_speakers:
                 # Get all users to check against
-                all_users = db.execute_query("SELECT name, phone FROM users")
-                for u in all_users:
-                    if u['name'] and u['name'].lower() in unique_speakers:
-                        target_phone = u['phone']
-                        logging.info(f"Targeting Matched Speaker: {u['name']} -> {target_phone}")
-                        break
+                all_users = db.execute_query("SELECT name, phone FROM users", fetch_all=True)
+                if all_users:
+                    for u in all_users:
+                        if u['name'] and u['name'].lower() in unique_speakers:
+                            target_phone = u['phone']
+                            logging.info(f"Targeting Matched Speaker: {u['name']} -> {target_phone}")
+                            break
 
         if not target_phone:
             # B. Try matching with recent meeting
