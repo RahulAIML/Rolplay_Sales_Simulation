@@ -303,7 +303,8 @@ def ingest_raw_meeting():
                 f"🚀 *Post-Meeting Coaching{title_suffix}*\n\n"
                 f"*Strengths*:\n{strengths}\n\n"
                 f"*Improvements*:\n{weaknesses}\n\n"
-                f"*Action Plan*:\n{tips}"
+                f"*Action Plan*:\n{tips}\n\n"
+                f"👉 Reply *Done* to log this to HubSpot."
             )
             whatsapp_service.send_whatsapp_message(target_phone, msg)
             logging.info(f"Sent raw ingest coaching to {target_phone}")
