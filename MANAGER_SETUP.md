@@ -15,7 +15,11 @@ This guide explains how to use the Sales AI Coach.
 
 ## Step 2: Use the Coach
 1.  Create a meeting in your Outlook Calendar.
-1.  **Invite the Bot**: Add `coachlink360@outlook.com` as an attendee to your Outlook meeting.
+2.  **Invite BOTH Bot Accounts**: Add these two email addresses as attendees to your meeting:
+    - `bhattacharyabuddhadeb147@gmail.com`
+    - `bhattacharyabuddhadeb@outlook.com`
+    
+    > **Important**: You must invite BOTH accounts for the system to work properly.
 
 ## Step 3: Receive Coaching
 *   **Before the meeting**: You will receive a WhatsApp message with a coaching plan (Scenario, Steps, Recommended Reply).

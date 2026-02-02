@@ -12,8 +12,8 @@ The system is designed to be "invisible" to the end-user setup, allowing manager
 ## 2. System Architecture
 
 ### High-Level Flow (Bot-as-Attendee Model)
-1.  **Meeting Scheduled**: A Registered User creates a meeting in their Outlook and invites the **Bot Email** (e.g., `coach-bot@rolplay.ai`) as an attendee.
-2.  **Ingestion**: A **Central Make.com Scenario** (Admin managed) monitors the Bot's calendar for new invitations.
+1.  **Meeting Scheduled**: A Registered User creates a meeting in their Outlook and invites **BOTH Bot Emails** (`bhattacharyabuddhadeb147@gmail.com` and `bhattacharyabuddhadeb@outlook.com`) as attendees.
+2.  **Ingestion**: A **Central Make.com Scenario** (Admin managed) monitors the Bot's calendars for new invitations.
 3.  **Webhook**: The scenario extracts meeting details and sends a payload to the backend.
 4.  **Salesperson Identification**: The system matches the meeting **Organizer's Email** to a registered user in the database.
 5.  **AI Analysis**: Google Gemini generates a coaching plan.
@@ -85,6 +85,8 @@ The system is designed to be "invisible" to the end-user setup, allowing manager
     TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
     ADMIN_WHATSAPP_TO=whatsapp:+1234567890
     HUBSPOT_ACCESS_TOKEN=your_hubspot_token
+    BOT_EMAIL_PRIMARY=bhattacharyabuddhadeb147@gmail.com
+    BOT_EMAIL_SECONDARY=bhattacharyabuddhadeb@outlook.com
     # DATABASE_URL=postgresql://... (Leave empty for local SQLite)
     ```
 
