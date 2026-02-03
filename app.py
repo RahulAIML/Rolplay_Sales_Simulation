@@ -8,7 +8,7 @@ load_dotenv()
 from twilio.twiml.messaging_response import MessagingResponse
 
 from database import db
-from services import meeting_service, whatsapp_service, ai_service, parsing_service
+from services import meeting_service, whatsapp_service, ai_service, parsing_service, hubspot_service
 from utils import normalize_phone
 import scheduler
 import json
@@ -90,11 +90,25 @@ def register():
         
         phone = normalize_phone(raw_phone)
         
-        existing = db.execute_query("SELECT email FROM users WHERE email = ?", (email,), fetch_one=True)
+        # Check if user exists
+        existing = db.execute_query("SELECT email, hubspot_contact_id FROM users WHERE email = ?", (email,), fetch_one=True)
+        
+        # Try to create or find HubSpot contact
+        hubspot_contact_id = None
+        try:
+            hubspot_contact_id = hubspot_service.create_or_find_contact(email, name, phone)
+            if hubspot_contact_id:
+                logging.info(f"HubSpot contact synced for {email}: {hubspot_contact_id}")
+        except Exception as e:
+            logging.warning(f"HubSpot sync failed for {email}: {e}")
+        
+        # Save to database
         if existing:
-            db.execute_query("UPDATE users SET name = ?, phone = ? WHERE email = ?", (name, phone, email), commit=True)
+            db.execute_query("UPDATE users SET name = ?, phone = ?, hubspot_contact_id = ? WHERE email = ?", 
+                           (name, phone, hubspot_contact_id, email), commit=True)
         else:
-            db.execute_query("INSERT INTO users (email, name, phone) VALUES (?, ?, ?)", (email, name, phone), commit=True)
+            db.execute_query("INSERT INTO users (email, name, phone, hubspot_contact_id) VALUES (?, ?, ?, ?)", 
+                           (email, name, phone, hubspot_contact_id), commit=True)
         
         # Get bot email addresses from environment
         bot_email_primary = os.getenv("BOT_EMAIL_PRIMARY", "bhattacharyabuddhadeb147@gmail.com")
@@ -383,6 +397,76 @@ def post_meeting_coaching_endpoint():
     except Exception as e:
         logging.error(f"Post-Meeting Coaching Error: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/survey-completed', methods=['POST'])
+def survey_completed_webhook():
+    """
+    Webhook endpoint to receive survey completion notifications from the external survey system.
+    Syncs survey responses to HubSpot as notes on the participant's contact.
+    
+    Expected payload:
+    {
+        "participant_email": "jane@example.com",
+        "participant_name": "Jane Doe",
+        "meeting_title": "Demo Meeting",
+        "session_id": "unique-session-id",
+        "survey_response": {
+            "punctuality": 5,
+            "listening_understanding": 5,
+            "knowledge_expertise": 4,
+            "clarity_answers": 5,
+            "overall_value": 5,
+            "most_valuable": "Great insights",
+            "improvements": "More examples needed"
+        },
+        "submitted_at": "2025-12-22T10:30:00Z"
+    }
+    """
+    data = request.json
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+    
+    try:
+        participant_email = data.get("participant_email")
+        if not participant_email:
+            return jsonify({"error": "Missing participant_email"}), 400
+        
+        survey_response = data.get("survey_response", {})
+        if not survey_response:
+            return jsonify({"error": "Missing survey_response"}), 400
+        
+        # Combine data for HubSpot sync
+        survey_data = {
+            **survey_response,
+            "participant_name": data.get("participant_name"),
+            "meeting_title": data.get("meeting_title"),
+            "session_id": data.get("session_id"),
+            "submitted_at": data.get("submitted_at")
+        }
+        
+        # Sync to HubSpot (non-blocking - don't fail webhook if HubSpot fails)
+        sync_success = hubspot_service.sync_survey_response_to_contact(participant_email, survey_data)
+        
+        if sync_success:
+            logging.info(f"Survey response synced to HubSpot for {participant_email}")
+        else:
+            logging.warning(f"Survey response received but HubSpot sync failed for {participant_email}")
+        
+        # Always return success to survey system (fire-and-forget pattern)
+        return jsonify({
+            "status": "received",
+            "hubspot_synced": sync_success,
+            "participant_email": participant_email
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Survey Webhook Error: {e}")
+        # Return 200 even on error to prevent survey system retry loops
+        return jsonify({
+            "status": "received",
+            "hubspot_synced": False,
+            "error": str(e)
+        }), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

@@ -11,11 +11,14 @@ from services import whatsapp_service
 
 def check_pending_meetings():
     """
-    Periodic job to check for finished meetings that need reminders.
+    Periodic job to check for finished meetings that need reminders
+    and poll for new survey responses.
     Rules:
     - Status is 'scheduled'.
     - Now > EndTime + 1 minute.
     """
+    from services import survey_service
+    
     now_utc = datetime.now(pytz.utc)
     
     meetings = db.execute_query("SELECT * FROM meetings WHERE status = 'scheduled'", fetch_all=True) or []
@@ -54,6 +57,19 @@ def check_pending_meetings():
                 
         except Exception as e:
             logging.error(f"Scheduler Job Error {m['id']}: {e}")
+    
+    # Poll surveys every 10 minutes (scheduler runs every minute)
+    current_minute = datetime.now().minute
+    if current_minute % 10 == 0:
+        try:
+            logging.info("Polling survey API...")
+            survey_service.poll_and_sync_surveys()
+            
+            # Cleanup old records once daily at midnight
+            if datetime.now().hour == 0:
+                survey_service.cleanup_old_sync_records()
+        except Exception as e:
+            logging.error(f"Survey polling error: {e}")
 
 def start_scheduler():
     """Starts the background scheduler if running on Render (Production)."""

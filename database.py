@@ -121,7 +121,8 @@ class DBHandler:
                 CREATE TABLE IF NOT EXISTS users (
                     email TEXT PRIMARY KEY,
                     name TEXT,
-                    phone TEXT
+                    phone TEXT,
+                    hubspot_contact_id TEXT
                 );
             """
 
@@ -147,6 +148,15 @@ class DBHandler:
                   coaching JSONB,
                   summary TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """
+            
+            create_synced_surveys_sql = """
+                CREATE TABLE IF NOT EXISTS synced_surveys (
+                  id SERIAL PRIMARY KEY,
+                  survey_id INTEGER UNIQUE NOT NULL,
+                  participant_email TEXT,
+                  synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """
         else:
@@ -190,7 +200,8 @@ class DBHandler:
                 CREATE TABLE IF NOT EXISTS users (
                     email TEXT PRIMARY KEY,
                     name TEXT,
-                    phone TEXT
+                    phone TEXT,
+                    hubspot_contact_id TEXT
                 );
             """
 
@@ -219,6 +230,15 @@ class DBHandler:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
             """
+            
+            create_synced_surveys_sql = """
+                CREATE TABLE IF NOT EXISTS synced_surveys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    survey_id INTEGER UNIQUE NOT NULL,
+                    participant_email TEXT,
+                    synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+            """
 
         # Execute
         # We can't use the execute_query helper easily for DDL scripts with multiple statements or specific logic
@@ -234,6 +254,8 @@ class DBHandler:
                 cur.execute(create_transcripts_sql)
             if 'create_coaching_sql' in locals():
                 cur.execute(create_coaching_sql)
+            if 'create_synced_surveys_sql' in locals():
+                cur.execute(create_synced_surveys_sql)
             conn.commit()
             
             # Migration check (Add columns if missing) - Simplified for robustness
@@ -245,6 +267,7 @@ class DBHandler:
                 if self.is_postgres:
                     alter_cmds = [
                         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS hubspot_contact_id TEXT",
+                        "ALTER TABLE users ADD COLUMN IF NOT EXISTS hubspot_contact_id TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS last_client_reply TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS salesperson_phone TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS summary TEXT",
@@ -272,6 +295,12 @@ class DBHandler:
                         cur.execute("ALTER TABLE meetings ADD COLUMN summary TEXT")
                     if 'read_ai_url' not in cols:
                         cur.execute("ALTER TABLE meetings ADD COLUMN read_ai_url TEXT")
+
+                    # Users
+                    cur.execute("PRAGMA table_info(users)")
+                    cols = [row['name'] for row in cur.fetchall()]
+                    if 'hubspot_contact_id' not in cols:
+                        cur.execute("ALTER TABLE users ADD COLUMN hubspot_contact_id TEXT")
 
                     # Transcripts
                     cur.execute("PRAGMA table_info(meeting_transcripts)")
