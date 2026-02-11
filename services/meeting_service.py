@@ -255,8 +255,40 @@ def process_outlook_webhook(data: dict) -> dict:
 
     # Extract Attendees
     attendees_list = meeting.get("attendees", [])
-    attendees_str = ", ".join([str(a) for a in attendees_list]) if isinstance(attendees_list, list) else str(attendees_list)
+    attendees_str = "None"
+    
+    if isinstance(attendees_list, list):
+        clean_list = []
+        for a in attendees_list:
+            if isinstance(a, dict):
+                # Try Outlook Structure: EmailAddress > Name/Address
+                email_obj = a.get("EmailAddress") or a.get("emailAddress")
+                if isinstance(email_obj, dict):
+                    name = email_obj.get("Name") or email_obj.get("name")
+                    address = email_obj.get("Address") or email_obj.get("address")
+                    if name and address:
+                        clean_list.append(f"{name} ({address})")
+                    elif name:
+                        clean_list.append(name)
+                    elif address:
+                        clean_list.append(address)
+                else:
+                    # Fallback: check top-level Name/Email/Address
+                    name = a.get("Name") or a.get("name")
+                    address = a.get("Address") or a.get("address") or a.get("Email") or a.get("email")
+                    if name and address:
+                         clean_list.append(f"{name} ({address})")
+                    elif name:
+                        clean_list.append(name)
+                    elif address:
+                        clean_list.append(address)
+            elif isinstance(a, str):
+                clean_list.append(a)
         
+        if clean_list:
+            attendees_str = ", ".join(clean_list)
+    else:
+        attendees_str = str(attendees_list)
     # Initial Insert (Updated with Location, Attendees, and Summary/Body)
     db.execute_query(
         "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, attendees, summary) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)",

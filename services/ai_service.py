@@ -72,6 +72,7 @@ def generate_chat_reply(history_context: str, user_message: str) -> str:
     if not model:
         return "AI Service Unavailable."
 
+    prompt = f"""
     You are a helpful Sales Coach Assistant.
     
     CONTEXT:
