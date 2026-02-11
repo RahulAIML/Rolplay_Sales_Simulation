@@ -72,7 +72,6 @@ def generate_chat_reply(history_context: str, user_message: str) -> str:
     if not model:
         return "AI Service Unavailable."
 
-    prompt = f"""
     You are a helpful Sales Coach Assistant.
     
     CONTEXT:
@@ -81,8 +80,9 @@ def generate_chat_reply(history_context: str, user_message: str) -> str:
     USER MESSAGE: "{user_message}"
     
     INSTRUCTIONS:
-    1. If the user asks a question about the meeting content (e.g. "What was the summary?", "Did I mention X?"), ANSWER IT based on the Context provided. Do not give advice on how to ask, just give the answer.
-    2. If the user asks for advice or roleplays, provide a short, helpful coaching tip (under 50 words).
+    1. If the CONTEXT contains "[FULL TRANSCRIPT AVAILABLE]", prioritize this verbatim text over any summary. Use it to answer specific questions like "Who said X?" or "What was the objection?".
+    2. If the user asks a question about the meeting content, ANSWER IT based on the Context provided. Do not suggest they look elsewhere.
+    3. If the user asks for advice or roleplays, provide a short, helpful coaching tip (under 50 words).
     
     Response:
     """

@@ -88,137 +88,178 @@ def create_or_find_contact(email: str, name: str, phone: str):
         logging.error(f"HubSpot Contact Creation Error: {e}")
         return None
 
-def sync_survey_response_to_contact(participant_email: str, survey_data: dict):
+def _create_ticket(contact_id: str, subject: str, content: str, priority: str = "LOW"):
     """
-    Syncs a survey response to HubSpot as a note on the participant's contact.
-    
-    Args:
-        participant_email: Email of the survey respondent
-        survey_data: Dictionary containing:
-            - punctuality (1-5)
-            - listening_understanding (1-5)
-            - knowledge_expertise (1-5)
-            - clarity_answers (1-5)
-            - overall_value (1-5)
-            - most_valuable (optional text)
-            - improvements (optional text)
-            - meeting_title (optional)
-            - session_id (optional)
-            - participant_name (optional)
-            - submitted_at (optional timestamp)
-    
-    Returns:
-        bool: True if synced successfully, False otherwise
+    Helper to create a ticket and associate it with a contact.
     """
     hubspot = get_client()
-    if not hubspot:
-        logging.warning("HubSpot client not initialized - skipping survey sync")
+    if not hubspot or not contact_id:
         return False
-    
+        
     try:
-        # Find or create contact
-        contact_id = search_contact_by_email(participant_email)
-        
-        if not contact_id:
-            # Optionally create contact if they don't exist
-            participant_name = survey_data.get('participant_name', participant_email.split('@')[0])
-            contact_id = create_or_find_contact(participant_email, participant_name, "")
-            
-        if not contact_id:
-            logging.warning(f"Could not find or create HubSpot contact for {participant_email}")
-            return False
-        
-        # Format star ratings
-        def stars(rating):
-            rating = int(rating) if rating else 0
-            return "⭐" * rating + f" ({rating}/5)"
-        
-        # Build formatted note body
-        meeting_title = survey_data.get('meeting_title', 'Meeting')
-        session_id = survey_data.get('session_id', '')
-        submitted_at = survey_data.get('submitted_at', datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC'))
-        
-        note_body = f"📊 **Meeting Survey Response**\n\n"
-        note_body += f"**Meeting:** {meeting_title}\n"
-        if session_id:
-            note_body += f"**Session ID:** {session_id}\n"
-        note_body += f"**Submitted:** {submitted_at}\n\n"
-        
-        note_body += "**RATINGS (1-5):**\n"
-        note_body += f"⏰ Punctuality: {stars(survey_data.get('punctuality'))}\n"
-        note_body += f"👂 Listening & Understanding: {stars(survey_data.get('listening_understanding'))}\n"
-        note_body += f"🎓 Knowledge & Expertise: {stars(survey_data.get('knowledge_expertise'))}\n"
-        note_body += f"💬 Clarity of Answers: {stars(survey_data.get('clarity_answers'))}\n"
-        note_body += f"✨ Overall Value: {stars(survey_data.get('overall_value'))}\n\n"
-        
-        # Add text feedback if provided
-        if survey_data.get('most_valuable') or survey_data.get('improvements'):
-            note_body += "**FEEDBACK:**\n"
-            if survey_data.get('most_valuable'):
-                note_body += f"**Most Valuable:** {survey_data.get('most_valuable')}\n"
-            if survey_data.get('improvements'):
-                note_body += f"**Improvements:** {survey_data.get('improvements')}\n"
-        
-        # Create note in HubSpot
         properties = {
-            "hs_timestamp": datetime.now(pytz.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
-            "hs_note_body": note_body
+            "subject": subject,
+            "content": content,
+            "hs_pipeline_stage": "1", # Default stage
+            "hs_pipeline": "0",       # Default pipeline
+            "hs_ticket_priority": priority
         }
+        
         batch_input = SimplePublicObjectInputForCreate(
             properties=properties,
             associations=[{
                 "to": {"id": contact_id},
-                "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 202}]
+                "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 16}] # 16 is Ticket -> Contact
             }]
         )
-        hubspot.crm.objects.notes.basic_api.create(simple_public_object_input_for_create=batch_input)
-        logging.info(f"HubSpot: Survey response synced for contact {participant_email} (ID: {contact_id})")
-        return True
         
+        result = hubspot.crm.tickets.basic_api.create(simple_public_object_input_for_create=batch_input)
+        logging.info(f"HubSpot: Ticket created (ID: {result.id}) for contact {contact_id}")
+        return True
     except Exception as e:
-        logging.error(f"HubSpot Survey Sync Error: {e}")
+        logging.error(f"HubSpot Ticket Creation Error: {e}")
         return False
+
+def sync_survey_response_to_contact(participant_email: str, survey_data: dict):
+    """
+    Syncs a survey response to HubSpot as a TICKET associated with the participant's contact.
+    """
+    # Find or create contact
+    contact_id = search_contact_by_email(participant_email)
+    
+    if not contact_id:
+        # Optionally create contact if they don't exist
+        participant_name = survey_data.get('participant_name', participant_email.split('@')[0])
+        contact_id = create_or_find_contact(participant_email, participant_name, "")
+        
+    if not contact_id:
+        logging.warning(f"Could not find or create HubSpot contact for {participant_email}")
+        return False
+    
+    # Format star ratings
+    def stars(rating):
+        rating = int(rating) if rating else 0
+        return "⭐" * rating + f" ({rating}/5)"
+    
+    # Build formatted ticket body
+    meeting_title = survey_data.get('meeting_title', 'Meeting')
+    session_id = survey_data.get('session_id', '')
+    submitted_at = survey_data.get('submitted_at', datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC'))
+    
+    ticket_subject = f"Survey Response: {meeting_title}"
+    
+    ticket_content = f"📊 **Meeting Survey Response**\n"
+    if session_id:
+        ticket_content += f"**Session ID:** {session_id}\n"
+    ticket_content += f"**Submitted:** {submitted_at}\n\n"
+    
+    ticket_content += "**RATINGS (1-5):**\n"
+    ticket_content += f"⏰ Punctuality: {stars(survey_data.get('punctuality'))}\n"
+    ticket_content += f"👂 Listening & Understanding: {stars(survey_data.get('listening_understanding'))}\n"
+    ticket_content += f"🎓 Knowledge & Expertise: {stars(survey_data.get('knowledge_expertise'))}\n"
+    ticket_content += f"💬 Clarity of Answers: {stars(survey_data.get('clarity_answers'))}\n"
+    ticket_content += f"✨ Overall Value: {stars(survey_data.get('overall_value'))}\n\n"
+    
+    # Add text feedback if provided
+    if survey_data.get('most_valuable') or survey_data.get('improvements'):
+        ticket_content += "**FEEDBACK:**\n"
+        if survey_data.get('most_valuable'):
+            ticket_content += f"**Most Valuable:** {survey_data.get('most_valuable')}\n"
+        if survey_data.get('improvements'):
+            ticket_content += f"**Improvements:** {survey_data.get('improvements')}\n"
+    
+    return _create_ticket(contact_id, ticket_subject, ticket_content, priority="MEDIUM")
 
 def sync_note_to_contact(client_db_id: int, note_body: str):
     """
-    Syncs a note to a HubSpot contact. 
-    Tries to use existing hubspot_contact_id, or searches by email.
+    Syncs a meeting note to a HubSpot contact as a TICKET.
     """
-    hubspot = get_client()
-    if not hubspot:
+    # Get Client Data
+    row = db.execute_query("SELECT email, hubspot_contact_id, name FROM clients WHERE id = ?", (client_db_id,), fetch_one=True)
+    if not row:
         return
 
-    try:
-        # Get Client Data
-        row = db.execute_query("SELECT email, hubspot_contact_id FROM clients WHERE id = ?", (client_db_id,), fetch_one=True)
-        if not row:
-            return
+    email = row['email']
+    hs_id = row['hubspot_contact_id']
 
-        email = row['email']
-        hs_id = row['hubspot_contact_id']
-
-        # Discovery: Find by Email if ID missing
-        if not hs_id and email:
-            hs_id = search_contact_by_email(email)
-            if hs_id:
-                # Cache ID
-                db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_id, client_db_id), commit=True)
-
-        # Sync Note
+    # Discovery: Find by Email if ID missing
+    if not hs_id and email:
+        hs_id = search_contact_by_email(email)
         if hs_id:
-            properties = {
-                "hs_timestamp": datetime.now(pytz.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
-                "hs_note_body": note_body
-            }
-            batch_input = SimplePublicObjectInputForCreate(
-                properties=properties,
-                associations=[{
-                    "to": {"id": hs_id},
-                    "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 202}]
-                }]
-            )
-            hubspot.crm.objects.notes.basic_api.create(simple_public_object_input_for_create=batch_input)
-            logging.info(f"HubSpot: Note synced for contact {hs_id}")
+            db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_id, client_db_id), commit=True)
 
+    if hs_id:
+        ticket_subject = f"Meeting Feedback: {row['name'] or 'Client'}"
+        _create_ticket(hs_id, ticket_subject, note_body)
+
+def sync_meeting_analysis(client_db_id: int, meeting_title: str, analysis: dict, transcript_url: str):
+    """
+    Syncs the Post-Meeting Analysis and Transcript URL to HubSpot as a Ticket.
+    """
+    # Get Client Data
+    row = db.execute_query("SELECT email, hubspot_contact_id, name FROM clients WHERE id = ?", (client_db_id,), fetch_one=True)
+    if not row:
+        logging.warning(f"Analysis Sync: Client {client_db_id} not found in DB.")
+        return
+
+    email = row['email']
+    hs_id = row['hubspot_contact_id']
+    
+    # Just in case ID is missing but we have Email
+    if not hs_id and email:
+        hs_id = create_or_find_contact(email, row['name'] or "Client", "")
+        if hs_id:
+             db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_id, client_db_id), commit=True)
+    
+    if not hs_id:
+        logging.warning(f"Analysis Sync: No HubSpot ID for Client {client_db_id} ({email})")
+        return
+
+    # Format Analysis
+    objections = "\n".join([f"- {o['quote']} (Context: {o.get('context','')})" for o in analysis.get('objections', [])])
+    buying_signals = "\n".join([f"- {s}" for s in analysis.get('buying_signals', [])])
+    risks = "\n".join([f"- {r}" for r in analysis.get('risks', [])])
+    next_steps = "\n".join([f"- {n}" for n in analysis.get('follow_up_actions', [])])
+    
+    content = (
+        f"🧠 **AI Meeting Analysis**\n\n"
+        f"**Meeting**: {meeting_title}\n"
+        f"**Transcript**: {transcript_url}\n\n"
+        f"🛑 **Objections**:\n{objections if objections else 'None registered'}\n\n"
+        f"📈 **Buying Signals**:\n{buying_signals if buying_signals else 'None registered'}\n\n"
+        f"⚠️ **Risks**:\n{risks if risks else 'None registered'}\n\n"
+        f"🚀 **Recommended Next Steps**:\n{next_steps if next_steps else 'None registered'}"
+    )
+    
+    subject = f"Meeting Analysis: {meeting_title}"
+    
+    return _create_ticket(hs_id, subject, content, priority="HIGH")
+
+def get_contact_details(contact_id: str):
+    """
+    Fetch specific properties for a contact to use in AI Context.
+    """
+    hubspot = get_client()
+    if not hubspot or not contact_id:
+        return None
+        
+    try:
+        properties = [
+            "jobtitle", 
+            "mobilephone", 
+            "lifecyclestage", 
+            "notes_last_updated",
+            "industry",
+            "company",
+            "total_revenue"
+        ]
+        
+        contact = hubspot.crm.contacts.basic_api.get_by_id(
+            contact_id=contact_id, 
+            properties=properties
+        )
+        return contact.properties
     except Exception as e:
-        logging.error(f"HubSpot Sync Error: {e}")
+        logging.error(f"HubSpot Get Details Error: {e}")
+        return None
+

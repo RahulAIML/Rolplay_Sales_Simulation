@@ -114,7 +114,9 @@ class DBHandler:
                     last_client_reply TEXT,
                     salesperson_phone TEXT,
                     summary TEXT,
-                    read_ai_url TEXT
+                    read_ai_url TEXT,
+                    location TEXT,
+                    attendees TEXT
                 );
             """
             create_usr_sql = """
@@ -193,6 +195,8 @@ class DBHandler:
                     salesperson_phone TEXT,
                     summary TEXT,
                     read_ai_url TEXT,
+                    location TEXT,
+                    attendees TEXT,
                     FOREIGN KEY(client_id) REFERENCES clients(id)
                 );
             """
@@ -271,7 +275,9 @@ class DBHandler:
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS last_client_reply TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS salesperson_phone TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS summary TEXT",
-                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS read_ai_url TEXT"
+                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS read_ai_url TEXT",
+                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS location TEXT",
+                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS attendees TEXT"
                     ]
                 else:
                     # SQLite doesn't support IF NOT EXISTS in ALTER COLUMN easily, 
@@ -295,6 +301,10 @@ class DBHandler:
                         cur.execute("ALTER TABLE meetings ADD COLUMN summary TEXT")
                     if 'read_ai_url' not in cols:
                         cur.execute("ALTER TABLE meetings ADD COLUMN read_ai_url TEXT")
+                    if 'location' not in cols:
+                        cur.execute("ALTER TABLE meetings ADD COLUMN location TEXT")
+                    if 'attendees' not in cols:
+                        cur.execute("ALTER TABLE meetings ADD COLUMN attendees TEXT")
 
                     # Users
                     cur.execute("PRAGMA table_info(users)")

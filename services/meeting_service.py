@@ -119,22 +119,43 @@ def process_outlook_webhook(data: dict) -> dict:
         first = client.get('first_name')
         last = client.get('last_name')
         
+        c_name = "Valued Client" # Default
         if first or last:
             c_name = f"{first or ''} {last or ''}".strip()
         else:
             c_name = client.get('name', 'Valued Client')
 
         if c_email:
-            c_exist = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
+            c_exist = db.execute_query("SELECT id, name, company, hubspot_contact_id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
             
             if c_exist:
                 client_id = c_exist['id']
+                # Determine fields to update (Don't overwrite with NULL/Default if exists)
+                
+                # 1. Name: Only update if we have a real name, OR if existing is NULL/Default
+                new_name = c_name
+                if c_name == "Valued Client" and c_exist['name'] and c_exist['name'] != "Valued Client":
+                    new_name = c_exist['name']
+                
+                # 2. Company: Update if provided, else keep existing
+                new_company = client.get("company")
+                if not new_company and c_exist['company']:
+                    new_company = c_exist['company']
+                    
+                # 3. HubSpot ID: Update if provided, else keep existing
+                new_hs_id = client.get("hubspot_contact_id")
+                if not new_hs_id and c_exist['hubspot_contact_id']:
+                    new_hs_id = c_exist['hubspot_contact_id']
+
                 # Update details
                 db.execute_query(
                     "UPDATE clients SET name=?, company=?, hubspot_contact_id=? WHERE email=?",
-                    (c_name, client.get("company"), client.get("hubspot_contact_id"), c_email),
+                    (new_name, new_company, new_hs_id, c_email),
                     commit=True
                 )
+                
+                # Update local variable c_name to be used downstream
+                c_name = new_name
             else:
                 db.execute_query(
                     "INSERT INTO clients (email, name, company, hubspot_contact_id) VALUES (?, ?, ?, ?)",
@@ -173,101 +194,113 @@ def process_outlook_webhook(data: dict) -> dict:
     start_dt = parse_iso_datetime(start_str) if start_str else datetime.now()
     end_dt = parse_iso_datetime(end_str) if end_str else datetime.now()
     
+    # Extract Body/Agenda
+    body_obj = meeting.get("body")
+    meeting_body = ""
+    if isinstance(body_obj, dict):
+        meeting_body = body_obj.get("content") or body_obj.get("Content") or ""
+    elif isinstance(body_obj, str):
+        meeting_body = body_obj
+        # Check if it's a JSON string (as seen in production logs)
+        if meeting_body.strip().startswith('{'):
+            try:
+                import json
+                parsed_body = json.loads(meeting_body)
+                if isinstance(parsed_body, dict):
+                    meeting_body = parsed_body.get("content") or parsed_body.get("Content") or meeting_body
+            except Exception as e:
+                logging.warning(f"Failed to parse body as JSON: {e}")
+
+    # 4. Enrish with HubSpot Context (NEW)
+    hs_context_str = ""
+    try:
+        # Determine valid HubSpot ID
+        final_hs_id = hs_contact_id 
+        if not final_hs_id and client_id:
+             # Check DB if not returned by sync
+             row = db.execute_query("SELECT hubspot_contact_id FROM clients WHERE id = ?", (client_id,), fetch_one=True)
+             if row:
+                 final_hs_id = row['hubspot_contact_id']
+        
+        if final_hs_id:
+            # Re-import to get new function (if not already available)
+            hubspot_service = __import__('services.hubspot_service', fromlist=['get_contact_details'])
+            hs_details = hubspot_service.get_contact_details(final_hs_id)
+            
+            if hs_details:
+                hs_context_str = "\n\n[HubSpot Context]\n"
+                if hs_details.get('jobtitle'): hs_context_str += f"Job Title: {hs_details.get('jobtitle')}\n"
+                if hs_details.get('company'): hs_context_str += f"Company: {hs_details.get('company')}\n"
+                if hs_details.get('industry'): hs_context_str += f"Industry: {hs_details.get('industry')}\n"
+                if hs_details.get('lifecyclestage'): hs_context_str += f"Stage: {hs_details.get('lifecyclestage')}\n"
+                if hs_details.get('total_revenue'): hs_context_str += f"Revenue: {hs_details.get('total_revenue')}\n"
+                if hs_details.get('notes_last_updated'): hs_context_str += f"Last Note: {hs_details.get('notes_last_updated')}\n"
+                
+                logging.info(f"Enriched meeting with HubSpot data for {final_hs_id}")
+    except Exception as e:
+        logging.error(f"Failed to enrich with HubSpot data: {e}")
+
+    # Append to Body so it's saved in 'summary' and seen by AI
+    if hs_context_str:
+        meeting_body += hs_context_str
+
+    # Extract Location
+    loc_obj = meeting.get("location")
+    location_str = "Unknown"
+    if isinstance(loc_obj, dict):
+        # Try various keys since sub-dicts aren't recursively normalized in line 31
+        location_str = loc_obj.get("display_name") or loc_obj.get("displayName") or loc_obj.get("DisplayName") or "Unknown"
+    elif isinstance(loc_obj, str):
+        location_str = loc_obj
+
+    # Extract Attendees
+    attendees_list = meeting.get("attendees", [])
+    attendees_str = ", ".join([str(a) for a in attendees_list]) if isinstance(attendees_list, list) else str(attendees_list)
+        
+    # Initial Insert (Updated with Location, Attendees, and Summary/Body)
     db.execute_query(
-        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone) VALUES (?, ?, ?, ?, 'scheduled', ?)",
-        (mtg_id, start_dt, end_dt, client_id, sp_phone),
+        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, attendees, summary) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)",
+        (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, attendees_str, meeting_body),
         commit=True
     )
+
+    coaching = ai_service.generate_coaching_plan(
+        meeting_title=meeting.get("title", "Meeting"),
+        client_name=c_name,
+        client_company=client.get("company", "Their Company") if client else "Their Company",
+        start_time=start_dt.strftime("%I:%M %p"),
+        meeting_body=meeting_body,
+        location=location_str
+    )
+
+        
+    # Format Message for Template (Business-Initiated)
+    steps_text = "\n".join(f"- {s}" for s in coaching.get("steps", []))
     
-    # 5. Trigger AI & Notify
-    # Only if we have a salesperson phone (which we checked above)
-    if sp_phone:
-        # Extract Body/Agenda
-        # meeting dict is already normalized locally, but original payload might be mixed.
-        # However, our process_outlook_webhook normalizes keys at the top.
-        # But wait, nested keys like Location.DisplayName are NOT normalized by the top loop.
-        # We need to access the Meeting object again or just be careful.
-        
-        # We already have 'meeting' which is the normalized version of the specific sub-object.
-        # Let's try to get body from it. 
-        # Note: If input was "Meeting Payload": {"Body": {"Content": "..."}}, the normalized version
-        # has keys like "body". If "body" was a dict {"content":...}, it stays a dict.
-        
-        body_obj = meeting.get("body")
-        meeting_body = ""
-        if isinstance(body_obj, dict):
-            meeting_body = body_obj.get("content") or body_obj.get("Content") or ""
-        elif isinstance(body_obj, str):
-            meeting_body = body_obj
-            # Check if it's a JSON string (as seen in production logs)
-            if meeting_body.strip().startswith('{'):
-                try:
-                    import json
-                    parsed_body = json.loads(meeting_body)
-                    if isinstance(parsed_body, dict):
-                        # Extract content from parsed JSON
-                        meeting_body = parsed_body.get("content") or parsed_body.get("Content") or meeting_body
-                except Exception as e:
-                    logging.warning(f"Failed to parse body as JSON: {e}")
-            
-            # SAVE BODY TO DB (Context for AI Chat)
-            # We use the 'summary' column to store the agenda initially so the chatbot knows what the meeting is about.
-            if meeting_body:
-                try:
-                    db.execute_query(
-                        "UPDATE meetings SET summary = ? WHERE outlook_event_id = ?", 
-                        (meeting_body, mtg_id), 
-                        commit=True
-                    )
-                except Exception as e:
-                    logging.error(f"Failed to save meeting body to DB: {e}")
-            
-        # Extract Location
-        loc_obj = meeting.get("location")
-        location_str = "Unknown"
-        if isinstance(loc_obj, dict):
-            # Try various keys since sub-dicts aren't recursively normalized in line 31
-            location_str = loc_obj.get("display_name") or loc_obj.get("displayName") or loc_obj.get("DisplayName") or "Unknown"
-        elif isinstance(loc_obj, str):
-            location_str = loc_obj
-
-        coaching = ai_service.generate_coaching_plan(
-            meeting_title=meeting.get("title", "Meeting"),
-            client_name=c_name,
-            client_company=client.get("company", "Their Company") if client else "Their Company",
-            start_time=start_dt.strftime("%I:%M %p"),
-            meeting_body=meeting_body,
-            location=location_str
-        )
-
-        
-        # Format Message for Template (Business-Initiated)
-        steps_text = "\n".join(f"- {s}" for s in coaching.get("steps", []))
-        
-        # Template variables (4-variable universal template)
-        template_vars = {
-            "1": f"🚀 *New Meeting: {meeting.get('title')}*",
-            "2": f"{coaching.get('greeting')}\n\n🎯 *Scenario*: {coaching.get('scenario')}",
-            "3": f"📋 *Prep Steps*:\n{steps_text}",
-            "4": f"💡 *Reply*: {coaching.get('recommended_reply')}"
-        }
-        
-        # Plain text fallback (for when template not available)
-        msg_body = (
-            f"🚀 *New Meeting: {meeting.get('title')}*\n"
-            f"{coaching.get('greeting')}\n\n"
-            f"🎯 *Scenario*: {coaching.get('scenario')}\n\n"
-            f"📋 *Prep Steps*:\n{steps_text}\n\n"
-            f"💡 *Reply*: {coaching.get('recommended_reply')}"
-        )
-        
-        whatsapp_service.send_whatsapp_message(
-            sp_phone, 
-            body=msg_body,
-            use_template=True, 
-            template_vars=template_vars
-        )
-        logging.info(f"Coaching sent to {sp_phone}")
+    # Template variables (4-variable universal template)
+    template_vars = {
+        "1": f"🚀 *New Meeting: {meeting.get('title')}*",
+        "2": f"{coaching.get('greeting')}\n\n🎯 *Scenario*: {coaching.get('scenario')}",
+        "3": f"📋 *Prep Steps*:\n{steps_text}",
+        "4": f"💡 *Reply*: {coaching.get('recommended_reply')}"
+    }
+    
+    # Plain text fallback (for when template not available)
+    msg_body = (
+        f"🚀 *New Meeting: {meeting.get('title')}*\n"
+        f"{coaching.get('greeting')}\n\n"
+        f"🎯 *Scenario*: {coaching.get('scenario')}\n\n"
+        f"📋 *Prep Steps*:\n{steps_text}\n\n"
+        f"💡 *Reply*: {coaching.get('recommended_reply')}"
+    )
+    
+    whatsapp_service.send_whatsapp_message(
+        sp_phone, 
+        body=msg_body,
+        use_template=True, 
+        template_vars=template_vars
+    )
+    logging.info(f"Coaching sent to {sp_phone}")
     
     return {"status": "success"}
 
@@ -392,8 +425,45 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     summary_context = m.get('summary', '')
 
     context = f"Salesperson is meeting with {c_name} from {client['company'] if client else 'Unknown'}."
-    if summary_context:
-        context += f"\n\nMeeting Summary: {summary_context[:2000]}"
+    
+    start = m.get('start_time')
+    end = m.get('end_time')
+    loc = m.get('location') or 'Unknown'
+    atts = m.get('attendees') or 'Unknown'
+    
+    # Try to parse ISO times to readable
+    try:
+        s_dt = parse_iso_datetime(start) if start else None
+        e_dt = parse_iso_datetime(end) if end else None
+        time_str = f"{s_dt.strftime('%b %d, %I:%M %p')} - {e_dt.strftime('%I:%M %p')}" if s_dt and e_dt else "Unknown Time"
+    except:
+        time_str = "Unknown Time"
+        
+    context += f"\nTime: {time_str}\nLocation: {loc}\nAttendees: {atts}"
+    
+    # 5. Fetch Full Transcript (NEW)
+    # Check if transcripts exist for this meeting
+    t_rows = db.execute_query(
+        "SELECT speaker, text FROM meeting_transcripts WHERE meeting_id = ? ORDER BY id ASC", 
+        (m['id'],), 
+        fetch_all=True
+    )
+    
+    transcript_text = ""
+    if t_rows:
+        # Reconstruct transcript
+        # Limit to last ~300 lines to fit context window (approx 6-8k tokens)
+        MAX_LINES = 300
+        if len(t_rows) > MAX_LINES:
+            transcript_text += "...[Truncated Preview]...\n"
+            t_rows = t_rows[-MAX_LINES:]
+            
+        transcript_text = "\n".join([f"{r['speaker']}: {r['text']}" for r in t_rows])
+
+    if transcript_text:
+        context += f"\n\n[FULL TRANSCRIPT AVAILABLE]\n{transcript_text}"
+    elif summary_context:
+        context += f"\n\nMeeting Summary/Agenda: {summary_context[:2000]}"
     
     reply = ai_service.generate_chat_reply(context, message_body)
     return reply
