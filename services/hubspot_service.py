@@ -263,3 +263,32 @@ def get_contact_details(contact_id: str):
         logging.error(f"HubSpot Get Details Error: {e}")
         return None
 
+def sync_meeting_summary(client_db_id: int, meeting_title: str, start_time: str, summary: str, location: str = ""):
+    """
+    Syncs the initial meeting agenda/summary to HubSpot as a Note/Ticket.
+    """
+    # Get Client Data
+    row = db.execute_query("SELECT email, hubspot_contact_id, name FROM clients WHERE id = ?", (client_db_id,), fetch_one=True)
+    if not row:
+        return
+
+    email = row['email']
+    hs_id = row['hubspot_contact_id']
+    
+    # Discovery
+    if not hs_id and email:
+        hs_id = search_contact_by_email(email)
+        if hs_id:
+             db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_id, client_db_id), commit=True)
+    
+    if hs_id:
+        # Create Ticket for the Meeting Event itself
+        subject = f"Scheduled Meeting: {meeting_title}"
+        content = (
+            f"📅 **Meeting Scheduled**\n"
+            f"**Time**: {start_time}\n"
+            f"**Location**: {location}\n\n"
+            f"📝 **Agenda/Summary**:\n{summary}"
+        )
+        return _create_ticket(hs_id, subject, content, priority="LOW")
+

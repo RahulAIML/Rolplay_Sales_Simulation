@@ -296,6 +296,20 @@ def process_outlook_webhook(data: dict) -> dict:
         commit=True
     )
 
+    # 5. Sync Meeting Summary to HubSpot (NEW)
+    try:
+        hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_summary'])
+        hubspot_service.sync_meeting_summary(
+            client_db_id=client_id,
+            meeting_title=subject,
+            start_time=start_str,
+            summary=meeting_body,
+            location=location_str
+        )
+        logging.info(f"HubSpot: Synced meeting summary for {subject}")
+    except Exception as e:
+        logging.error(f"HubSpot Summary Sync Failed: {e}")
+
     coaching = ai_service.generate_coaching_plan(
         meeting_title=meeting.get("title", "Meeting"),
         client_name=c_name,
