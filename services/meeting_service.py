@@ -210,6 +210,18 @@ def process_outlook_webhook(data: dict) -> dict:
                 except Exception as e:
                     logging.warning(f"Failed to parse body as JSON: {e}")
             
+            # SAVE BODY TO DB (Context for AI Chat)
+            # We use the 'summary' column to store the agenda initially so the chatbot knows what the meeting is about.
+            if meeting_body:
+                try:
+                    db.execute_query(
+                        "UPDATE meetings SET summary = ? WHERE outlook_event_id = ?", 
+                        (meeting_body, mtg_id), 
+                        commit=True
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to save meeting body to DB: {e}")
+            
         # Extract Location
         loc_obj = meeting.get("location")
         location_str = "Unknown"
