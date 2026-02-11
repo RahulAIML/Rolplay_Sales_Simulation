@@ -58,7 +58,14 @@ def process_outlook_webhook(data: dict) -> dict:
     org_email = None
 
     if isinstance(organizer, dict):
+        # Direct key check
         raw_email = organizer.get("email") or organizer.get("address")
+        
+        # Check for nested Outlook/Make structure: Organizer > Email Address > Address
+        if not raw_email:
+             email_obj = organizer.get("Email Address") or organizer.get("emailAddress")
+             if isinstance(email_obj, dict):
+                 raw_email = email_obj.get("Address") or email_obj.get("address")
         # Check if it looks like a JSON string '{"name":...}'
         if isinstance(raw_email, str) and raw_email.strip().startswith('{'):
             try:
@@ -145,6 +152,20 @@ def process_outlook_webhook(data: dict) -> dict:
          logging.info(f"Meeting {mtg_id} already exists. Skipping processing.")
          return {"status": "success", "message": "Meeting already processed"}, 200
 
+    # 3.5. Sync Client to HubSpot (NEW)
+    hs_contact_id = None
+    if client_id and c_email:
+        try:
+            hubspot_service = __import__('services.hubspot_service', fromlist=['create_or_find_contact'])
+            # Pass empty phone if not in client data
+            hs_contact_id = hubspot_service.create_or_find_contact(c_email, c_name, client.get("phone", ""))
+            
+            if hs_contact_id:
+                db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_contact_id, client_id), commit=True)
+                logging.info(f"HubSpot Client Synced: {c_email} -> {hs_contact_id}")
+        except Exception as e:
+             logging.error(f"HubSpot Client Sync Failed: {e}")
+
     start_str = meeting.get("start_time")
     end_str = meeting.get("end_time")
     
@@ -161,17 +182,56 @@ def process_outlook_webhook(data: dict) -> dict:
     # 5. Trigger AI & Notify
     # Only if we have a salesperson phone (which we checked above)
     if sp_phone:
+        # Extract Body/Agenda
+        # meeting dict is already normalized locally, but original payload might be mixed.
+        # However, our process_outlook_webhook normalizes keys at the top.
+        # But wait, nested keys like Location.DisplayName are NOT normalized by the top loop.
+        # We need to access the Meeting object again or just be careful.
+        
+        # We already have 'meeting' which is the normalized version of the specific sub-object.
+        # Let's try to get body from it. 
+        # Note: If input was "Meeting Payload": {"Body": {"Content": "..."}}, the normalized version
+        # has keys like "body". If "body" was a dict {"content":...}, it stays a dict.
+        
+        body_obj = meeting.get("body")
+        meeting_body = ""
+        if isinstance(body_obj, dict):
+            meeting_body = body_obj.get("content") or body_obj.get("Content") or ""
+        elif isinstance(body_obj, str):
+            meeting_body = body_obj
+            
+        # Extract Location
+        loc_obj = meeting.get("location")
+        location_str = "Unknown"
+        if isinstance(loc_obj, dict):
+            # Try various keys since sub-dicts aren't recursively normalized in line 31
+            location_str = loc_obj.get("display_name") or loc_obj.get("displayName") or loc_obj.get("DisplayName") or "Unknown"
+        elif isinstance(loc_obj, str):
+            location_str = loc_obj
+
         coaching = ai_service.generate_coaching_plan(
             meeting_title=meeting.get("title", "Meeting"),
             client_name=c_name,
             client_company=client.get("company", "Their Company") if client else "Their Company",
-            start_time=start_dt.strftime("%I:%M %p")
+            start_time=start_dt.strftime("%I:%M %p"),
+            meeting_body=meeting_body,
+            location=location_str
         )
 
         
-        # Format Message
+        # Format Message for Template (Business-Initiated)
         steps_text = "\n".join(f"- {s}" for s in coaching.get("steps", []))
-        msg = (
+        
+        # Template variables (4-variable universal template)
+        template_vars = {
+            "1": f"🚀 *New Meeting: {meeting.get('title')}*",
+            "2": f"{coaching.get('greeting')}\n\n🎯 *Scenario*: {coaching.get('scenario')}",
+            "3": f"📋 *Prep Steps*:\n{steps_text}",
+            "4": f"💡 *Reply*: {coaching.get('recommended_reply')}"
+        }
+        
+        # Plain text fallback (for when template not available)
+        msg_body = (
             f"🚀 *New Meeting: {meeting.get('title')}*\n"
             f"{coaching.get('greeting')}\n\n"
             f"🎯 *Scenario*: {coaching.get('scenario')}\n\n"
@@ -179,7 +239,12 @@ def process_outlook_webhook(data: dict) -> dict:
             f"💡 *Reply*: {coaching.get('recommended_reply')}"
         )
         
-        whatsapp_service.send_whatsapp_message(sp_phone, msg)
+        whatsapp_service.send_whatsapp_message(
+            sp_phone, 
+            body=msg_body,
+            use_template=True, 
+            template_vars=template_vars
+        )
         logging.info(f"Coaching sent to {sp_phone}")
     
     return {"status": "success"}
@@ -379,14 +444,23 @@ def process_transcript_webhook(data: dict):
     # 5. Notify
     phone = matched_meeting['salesperson_phone']
     if phone and analysis:
-        # Format Report
+        # Format Report for Template (Business-Initiated)
         objections = "\n".join([f"• \"{o['quote']}\"" for o in analysis.get('objections', [])])
         next_steps = "\n".join([f"• {s}" for s in analysis.get('follow_up_actions', [])])
         
         if not objections:
             objections = "None detected."
-            
-        msg = (
+        
+        # Template variables (4-variable universal template)
+        template_vars = {
+            "1": f"🧠 *Post-Meeting Analysis ({title})*",
+            "2": f"🛑 *Objections*:\n{objections}\n\n📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
+            "3": f"⚠️ *Risks*: {len(analysis.get('risks', []))} identified\n\n🚀 *Next Steps*:\n{next_steps}",
+            "4": "👉 Reply *Done* after you have followed up."
+        }
+        
+        # Plain text fallback
+        msg_body = (
             f"🧠 *Post-Meeting Analysis ({title})*\n\n"
             f"🛑 *Objections*:\n{objections}\n\n"
             f"📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
@@ -394,7 +468,27 @@ def process_transcript_webhook(data: dict):
             f"🚀 *Next Steps*:\n{next_steps}\n\n"
             f"👉 Reply *Done* after you have followed up."
         )
-        whatsapp_service.send_whatsapp_message(phone, msg)
+        
+        
+        whatsapp_service.send_whatsapp_message(
+            phone,
+            body=msg_body,
+            use_template=True,
+            template_vars=template_vars
+        )
+
+    # 6. Log to HubSpot (NEW)
+    if matched_meeting and analysis:
+        try:
+            hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis'])
+            hubspot_service.sync_meeting_analysis(
+                client_db_id=matched_meeting['client_id'],
+                meeting_title=title,
+                analysis=analysis,
+                transcript_url=url
+            )
+        except Exception as e:
+            logging.error(f"HubSpot Analysis Sync Failed: {e}")
         
     return {"status": "processed", "meeting_id": matched_meeting['id']}
 

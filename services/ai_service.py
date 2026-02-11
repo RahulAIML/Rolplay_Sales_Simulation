@@ -13,7 +13,7 @@ else:
     model = None
     logging.error("GEMINI_API_KEY not found. AI features will fail.")
 
-def generate_coaching_plan(meeting_title: str, client_name: str, client_company: str, start_time: str) -> dict:
+def generate_coaching_plan(meeting_title: str, client_name: str, client_company: str, start_time: str, meeting_body: str = "", location: str = "") -> dict:
     """
     Generates a pre-meeting coaching plan in JSON format.
     """
@@ -29,11 +29,13 @@ def generate_coaching_plan(meeting_title: str, client_name: str, client_company:
     - Client Name: {client_name}
     - Client Company: {client_company}
     - Time: {start_time}
+    - Agenda/Body: {meeting_body}
+    - Location: {location}
 
     TASK:
     Generate a coaching plan in JSON format.
     1. 'greeting': A motivating, professional greeting.
-    2. 'scenario': A 1-sentence summary of what this meeting likely involves based on the title.
+    2. 'scenario': A 1-sentence summary of what this meeting likely involves based on the title and agenda.
     3. 'steps': 3 concise, actionable bullet points for preparation.
     4. 'recommended_reply': A short, professional acknowledgement message the salesperson can say to you (the bot).
 
