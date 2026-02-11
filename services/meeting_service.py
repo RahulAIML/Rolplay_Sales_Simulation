@@ -199,6 +199,16 @@ def process_outlook_webhook(data: dict) -> dict:
             meeting_body = body_obj.get("content") or body_obj.get("Content") or ""
         elif isinstance(body_obj, str):
             meeting_body = body_obj
+            # Check if it's a JSON string (as seen in production logs)
+            if meeting_body.strip().startswith('{'):
+                try:
+                    import json
+                    parsed_body = json.loads(meeting_body)
+                    if isinstance(parsed_body, dict):
+                        # Extract content from parsed JSON
+                        meeting_body = parsed_body.get("content") or parsed_body.get("Content") or meeting_body
+                except Exception as e:
+                    logging.warning(f"Failed to parse body as JSON: {e}")
             
         # Extract Location
         loc_obj = meeting.get("location")
