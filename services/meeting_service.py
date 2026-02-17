@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timedelta
 from database import db
 from utils import normalize_phone, parse_iso_datetime
-from services import ai_service, whatsapp_service, hubspot_service, transcript_service
+from services import ai_service, whatsapp_service, hubspot_service, transcript_service, aux_service
 
 # Constants
 ADMIN_WHATSAPP_TO = os.getenv("ADMIN_WHATSAPP_TO")
@@ -289,10 +289,40 @@ def process_outlook_webhook(data: dict) -> dict:
             attendees_str = ", ".join(clean_list)
     else:
         attendees_str = str(attendees_list)
-    # Initial Insert (Updated with Location, Attendees, and Summary/Body)
+
+    # 4.5. Aux API Scheduling (NEW)
+    aux_token = None
+    aux_id = None
+    meeting_link = None
+    
+    # Extract link from location or body
+    link_pattern = r"(https?://(?:[a-zA-Z0-9-]+\.)?(?:zoom\.us|meet\.google\.com|microsoft\.com/microsoft-teams)/[^\s>]+)"
+    
+    all_content = f"{location_str} {meeting_body}"
+    import re
+    link_match = re.search(link_pattern, all_content)
+    if link_match:
+        meeting_link = link_match.group(1)
+        logging.info(f"Found meeting link: {meeting_link}")
+        
+        # Schedule with Aux
+        try:
+            aux_res = aux_service.schedule_meeting(
+                meeting_link=meeting_link,
+                scheduled_time=start_dt.isoformat(),
+                title=meeting.get("title", "Sales Meeting")
+            )
+            if aux_res:
+                aux_token = aux_res.get("token")
+                aux_id = aux_res.get("meetingId")
+                logging.info(f"Aux Scheduled: ID={aux_id}, Token={aux_token}")
+        except Exception as e:
+            logging.error(f"Aux scheduling failed: {e}")
+
+    # Initial Insert (Updated with Location, Attendees, Summary/Body, and Aux details)
     db.execute_query(
-        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, attendees, summary) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)",
-        (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, attendees_str, meeting_body),
+        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, attendees, summary, aux_meeting_id, aux_meeting_token) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)",
+        (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, attendees_str, meeting_body, aux_id, aux_token),
         commit=True
     )
 
@@ -518,11 +548,7 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
 
 def process_transcript_webhook(data: dict):
     """
-    1. Validates & Finds Meeting in DB (via Title/Time).
-    2. Fetches & Parses Transcript.
-    3. Stores Transcript Lines.
-    4. Generates AI Analysis.
-    5. Sends WhatsApp Report.
+    Webhook entry point for Read.ai transcripts.
     """
     logging.info(f"Processing Transcript Webhook: {data}")
     
@@ -534,23 +560,16 @@ def process_transcript_webhook(data: dict):
         raise ValueError("Missing title, time, or url")
 
     # 1. Find Meeting
-    # Fuzzy match by time (similar to previous approach)
     webhook_dt = parse_iso_datetime(time_str)
-    
-    # Check last 30 days of meetings
     candidates = db.execute_query(
         "SELECT * FROM meetings WHERE start_time IS NOT NULL ORDER BY id DESC LIMIT 50", 
         fetch_all=True
     ) or []
     
-
-    
     matched_meeting = None
-    
     for m in candidates:
         try:
             m_dt = parse_iso_datetime(m['start_time'])
-            # 15 min tolerance?
             if abs(m_dt - webhook_dt) <= timedelta(minutes=20):
                 matched_meeting = m
                 break
@@ -561,35 +580,55 @@ def process_transcript_webhook(data: dict):
         logging.warning("No matching meeting found for transcript.")
         return {"status": "skipped", "reason": "No meeting found"}
 
-    # 2. Fetch & Parse
-    # 2. Fetch & Parse
+    # 2. Fetch Content
     source = data.get("source", "read_ai")
     try:
         content = transcript_service.fetch_transcript(url)
     except Exception:
-        logging.error(f"Failed to fetch transcript from {url}. Silently failing.")
-        return {"status": "error", "message": "Fetch failed (silent)"}
+        logging.error(f"Failed to fetch transcript from {url}.")
+        return {"status": "error", "message": "Fetch failed"}
 
-    lines = transcript_service.parse_transcript(content)
+    # 3. Process
+    return process_transcript_data(matched_meeting, content, title, source, url)
+
+def process_aux_transcript(meeting_row, aux_data):
+    """
+    Processes transcript data specifically from the Aux API response.
+    """
+    transcript_info = aux_data.get("transcript", {})
+    content = transcript_info.get("content", "")
+    title = aux_data.get("title", "Aux Meeting")
     
-    # 3. Store (Pass source)
-    transcript_service.store_transcript(matched_meeting['id'], lines, source=source)
+    if not content:
+        logging.warning(f"No transcript content for Aux meeting {meeting_row['id']}")
+        return False
+        
+    res = process_transcript_data(meeting_row, content, title, source="aux_api")
+    return res.get("status") == "processed"
+
+def process_transcript_data(meeting_row, transcript_content, title, source, transcript_url=None):
+    """
+    Core logic to parse, store, analyze and notify regarding a transcript.
+    """
+    meeting_id = meeting_row['id']
     
-    # 4. Analyze
+    # 1. Parse
+    lines = transcript_service.parse_transcript(transcript_content)
+    
+    # 2. Store
+    transcript_service.store_transcript(meeting_id, lines, source=source)
+    
+    # 3. Analyze
     full_text = transcript_service.get_full_transcript_text(lines)
     analysis = ai_service.generate_post_meeting_analysis(full_text)
     
-    # 5. Notify
-    phone = matched_meeting['salesperson_phone']
+    # 4. Notify
+    phone = meeting_row['salesperson_phone']
     if phone and analysis:
-        # Format Report for Template (Business-Initiated)
-        objections = "\n".join([f"• \"{o['quote']}\"" for o in analysis.get('objections', [])])
+        # Format Report
+        objections = "\n".join([f"• \"{o['quote']}\"" for o in analysis.get('objections', [])]) or "None detected."
         next_steps = "\n".join([f"• {s}" for s in analysis.get('follow_up_actions', [])])
         
-        if not objections:
-            objections = "None detected."
-        
-        # Template variables (4-variable universal template)
         template_vars = {
             "1": f"🧠 *Post-Meeting Analysis ({title})*",
             "2": f"🛑 *Objections*:\n{objections}\n\n📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
@@ -597,7 +636,6 @@ def process_transcript_webhook(data: dict):
             "4": "👉 Reply *Done* after you have followed up."
         }
         
-        # Plain text fallback
         msg_body = (
             f"🧠 *Post-Meeting Analysis ({title})*\n\n"
             f"🛑 *Objections*:\n{objections}\n\n"
@@ -607,7 +645,6 @@ def process_transcript_webhook(data: dict):
             f"👉 Reply *Done* after you have followed up."
         )
         
-        
         whatsapp_service.send_whatsapp_message(
             phone,
             body=msg_body,
@@ -615,18 +652,16 @@ def process_transcript_webhook(data: dict):
             template_vars=template_vars
         )
 
-    # 6. Log to HubSpot (NEW)
-    if matched_meeting and analysis:
-        try:
-            hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis'])
-            hubspot_service.sync_meeting_analysis(
-                client_db_id=matched_meeting['client_id'],
-                meeting_title=title,
-                analysis=analysis,
-                transcript_url=url
-            )
-        except Exception as e:
-            logging.error(f"HubSpot Analysis Sync Failed: {e}")
+    # 5. Log to HubSpot
+    try:
+        hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis'])
+        hubspot_service.sync_meeting_analysis(
+            client_db_id=meeting_row['client_id'],
+            meeting_title=title,
+            analysis=analysis,
+            transcript_url=transcript_url or "Stored in Database"
+        )
+    except Exception as e:
+        logging.error(f"HubSpot Analysis Sync Failed: {e}")
         
-    return {"status": "processed", "meeting_id": matched_meeting['id']}
-
+    return {"status": "processed", "meeting_id": meeting_id}

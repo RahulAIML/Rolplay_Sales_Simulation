@@ -116,7 +116,9 @@ class DBHandler:
                     summary TEXT,
                     read_ai_url TEXT,
                     location TEXT,
-                    attendees TEXT
+                    attendees TEXT,
+                    aux_meeting_id INTEGER,
+                    aux_meeting_token TEXT
                 );
             """
             create_usr_sql = """
@@ -197,6 +199,8 @@ class DBHandler:
                     read_ai_url TEXT,
                     location TEXT,
                     attendees TEXT,
+                    aux_meeting_id INTEGER,
+                    aux_meeting_token TEXT,
                     FOREIGN KEY(client_id) REFERENCES clients(id)
                 );
             """
@@ -277,7 +281,9 @@ class DBHandler:
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS summary TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS read_ai_url TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS location TEXT",
-                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS attendees TEXT"
+                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS attendees TEXT",
+                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS aux_meeting_id INTEGER",
+                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS aux_meeting_token TEXT"
                     ]
                 else:
                     # SQLite doesn't support IF NOT EXISTS in ALTER COLUMN easily, 
@@ -305,6 +311,10 @@ class DBHandler:
                         cur.execute("ALTER TABLE meetings ADD COLUMN location TEXT")
                     if 'attendees' not in cols:
                         cur.execute("ALTER TABLE meetings ADD COLUMN attendees TEXT")
+                    if 'aux_meeting_id' not in cols:
+                        cur.execute("ALTER TABLE meetings ADD COLUMN aux_meeting_id INTEGER")
+                    if 'aux_meeting_token' not in cols:
+                        cur.execute("ALTER TABLE meetings ADD COLUMN aux_meeting_token TEXT")
 
                     # Users
                     cur.execute("PRAGMA table_info(users)")

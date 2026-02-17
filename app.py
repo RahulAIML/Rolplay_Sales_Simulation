@@ -168,6 +168,11 @@ def readai_ingest_webhook():
         return jsonify({"error": "No data"}), 400
         
     try:
+        # Support both Read.ai format and Aux format
+        if "meeting" in data and "transcript" in data["meeting"]:
+            result = meeting_service.process_aux_transcript({}, data["meeting"])
+            return jsonify({"status": "success", "source": "aux_api_detected"}), 200
+            
         result = meeting_service.process_transcript_webhook(data)
         return jsonify(result), 200
     except Exception as e:
@@ -183,12 +188,19 @@ def ingest_raw_meeting():
     logging.info(f"Ingest Raw Text Length: {len(raw_text)}")
     logging.info(f"Ingest Raw Text Snippet: {raw_text[:200]}")
     
+    # Support for Aux API JSON format if sent here
+    if not raw_text and "meeting" in data:
+        mtg = data["meeting"]
+        raw_text = mtg.get("transcript", {}).get("content", "")
+        if raw_text:
+             logging.info("Detected Aux API JSON structure in raw ingest")
+    
     if not raw_text:
         logging.warning(f"Ingest received empty raw_text. Keys received: {list(data.keys())}")
     
-    session_id = None
+    session_id = data.get("session_id") # Support explicit session_id
     transcript = ""
-    summary = None
+    summary = data.get("summary")
     
     # 1. PARSING (Robust)
     try:

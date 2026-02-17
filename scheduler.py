@@ -7,7 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import db
 from utils import parse_iso_datetime
-from services import whatsapp_service
+from services import whatsapp_service, aux_service, meeting_service
 
 def check_pending_meetings():
     """
@@ -58,6 +58,26 @@ def check_pending_meetings():
         except Exception as e:
             logging.error(f"Scheduler Job Error {m['id']}: {e}")
     
+    # 2. POLL AUX API FOR TRANSCRIPTS
+    # Find meetings that have an Aux token but aren't fully processed yet.
+    # We'll check 'reminder_sent' meetings that have an aux_token.
+    aux_meetings = db.execute_query(
+        "SELECT * FROM meetings WHERE aux_meeting_token IS NOT NULL AND status IN ('scheduled', 'reminder_sent')", 
+        fetch_all=True
+    ) or []
+    
+    for am in aux_meetings:
+        try:
+            status_data = aux_service.get_meeting_status(am['aux_meeting_token'])
+            if status_data and status_data.get("status") == "completed":
+                logging.info(f"Aux meeting {am['id']} is completed. Processing transcript...")
+                success = meeting_service.process_aux_transcript(am, status_data)
+                if success:
+                    db.execute_query("UPDATE meetings SET status = 'completed' WHERE id = ?", (am['id'],), commit=True)
+                    logging.info(f"Aux meeting {am['id']} fully processed and marked completed.")
+        except Exception as e:
+            logging.error(f"Error polling Aux status for meeting {am['id']}: {e}")
+
     # Poll surveys every 10 minutes (scheduler runs every minute)
     current_minute = datetime.now().minute
     if current_minute % 10 == 0:
