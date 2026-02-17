@@ -293,18 +293,22 @@ def process_outlook_webhook(data: dict) -> dict:
     # 4.5. Aux API Scheduling (NEW)
     aux_token = None
     aux_id = None
-    meeting_link = None
-    
     # Extract link from location or body
-    link_pattern = r"(https?://(?:[a-zA-Z0-9-]+\.)?(?:zoom\.us|meet\.google\.com|microsoft\.com/microsoft-teams)/[^\s>]+)"
+    link_pattern = r"(https?://(?:[a-zA-Z0-9-]+\.)?(?:zoom\.us|meet\.google\.com|teams\.(?:live|microsoft)\.com)/[^\s\"<>]+)"
     
-    all_content = f"{location_str} {meeting_body}"
-    import re
-    link_match = re.search(link_pattern, all_content)
-    if link_match:
-        meeting_link = link_match.group(1)
-        logging.info(f"Found meeting link: {meeting_link}")
-        
+    # Check online_meeting_url first
+    meeting_link = meeting.get("online_meeting_url")
+    if meeting_link:
+        logging.info(f"Using online_meeting_url: {meeting_link}")
+    else:
+        all_content = f"{location_str} {meeting_body}"
+        import re
+        link_match = re.search(link_pattern, all_content)
+        if link_match:
+            meeting_link = link_match.group(1)
+            logging.info(f"Found meeting link in content: {meeting_link}")
+    
+    if meeting_link:
         # Schedule with Aux
         try:
             aux_res = aux_service.schedule_meeting(
