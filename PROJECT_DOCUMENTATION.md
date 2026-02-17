@@ -12,7 +12,7 @@ The system is designed to be "invisible" to the end-user setup, allowing manager
 ## 2. System Architecture
 
 ### High-Level Flow (Bot-as-Attendee Model)
-1.  **Meeting Scheduled**: A Registered User creates a meeting in their Outlook and invites **BOTH Bot Emails** (`bhattacharyabuddhadeb147@gmail.com` and `bhattacharyabuddhadeb@outlook.com`) as attendees.
+1.  **Meeting Scheduled**: A Registered User creates a meeting in their Outlook and invites the **Bot Email** (`bhattacharyabuddhadeb@outlook.com`) as an attendee.
 2.  **Ingestion**: A **Central Make.com Scenario** (Admin managed) monitors the Bot's calendars for new invitations.
 3.  **Webhook**: The scenario extracts meeting details and sends a payload to the backend.
 4.  **Salesperson Identification**: The system matches the meeting **Organizer's Email** to a registered user in the database.
@@ -85,8 +85,7 @@ The system is designed to be "invisible" to the end-user setup, allowing manager
     TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
     ADMIN_WHATSAPP_TO=whatsapp:+1234567890
     HUBSPOT_ACCESS_TOKEN=your_hubspot_token
-    BOT_EMAIL_PRIMARY=bhattacharyabuddhadeb147@gmail.com
-    BOT_EMAIL_SECONDARY=bhattacharyabuddhadeb@outlook.com
+    BOT_EMAIL=bhattacharyabuddhadeb@outlook.com
     # DATABASE_URL=postgresql://... (Leave empty for local SQLite)
     ```
 
@@ -150,18 +149,25 @@ The project includes a `render.yaml` Blueprint for Infrastructure-as-Code deploy
 
 ---
 
-## 7. Post-Meeting / Read.ai Integration
+## 7. Meeting Transcript Integration
 
-The system now supports post-meeting analysis via Read.ai integration.
+The system supports automated transcript capture and analysis through the Aux Transcript API (Primary) and Read.ai (Legacy).
 
-### Flow
+### 🚀 Primary Flow: Aux API (Automated)
+1. **Detection**: The system automatically extracts Zoom, Google Meet, or Microsoft Teams links from Outlook invites.
+2. **Scheduling**: A bot is automatically scheduled to join the meeting via the Aux API.
+3. **Polling**: The background scheduler polls the Aux API for status changes.
+4. **Analysis**: Once the meeting is completed, the transcript is fetched and analyzed by Gemini AI.
+
+### 🔄 Legacy Flow: Read.ai (Manual Ingest)
 1. **Meeting Ends**: Read.ai generates a transcript.
 2. **Make.com**: A scenario triggers and pushes the raw transcript to `/api/ingest-raw-meeting`.
-3. **Parsing**: The API automatically handles Make.com's "concatenated" text format (Session ID + Speaker Names) using smart prefix detection.
-4. **Coaching**: The AI analyzes the transcript for Strengths, Weaknesses, and Actionable Tips.
-5. **Notification**: A WhatsApp message is sent to the salesperson (matched by Organizer Email or recent Active Meeting).
+3. **Unified Analysis**: The system detects the source and processes it using the same analysis engine.
 
 ### Endpoints
+#### `POST /outlook-webhook` (Updated)
+Now handles meeting scheduling with Aux API if a valid meeting link is present in the `location` or `body`.
+
 #### `POST /api/ingest-raw-meeting`
 *   **Payload (JSON)**:
     ```json
@@ -169,14 +175,7 @@ The system now supports post-meeting analysis via Read.ai integration.
         "raw_text": "12345SpeakerA: Hello..."
     }
     ```
-*   **Response**:
-    ```json
-    {
-        "status": "success",
-        "session_id": "12345",
-        "notified": true
-    }
-    ```
+*   **Support**: Now also supports full Aux JSON payloads for robustness.
 
 ---
 
