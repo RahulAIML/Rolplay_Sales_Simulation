@@ -35,9 +35,14 @@ def send_whatsapp_message(to_number: str, body: str = None, use_template: bool =
         return None
 
     # Twilio requires 'whatsapp:' prefix for WhatsApp messages
-    # Ensure they are present for both FROM and TO
-    actual_from = FROM_NUMBER if FROM_NUMBER.startswith("whatsapp:") else f"whatsapp:{FROM_NUMBER}"
-    actual_to = to_number if to_number.startswith("whatsapp:") else f"whatsapp:{to_number}"
+    # Ensure they are present for both FROM and TO, but don't double up
+    actual_from = FROM_NUMBER
+    if actual_from and not actual_from.startswith("whatsapp:"):
+        actual_from = f"whatsapp:{actual_from}"
+        
+    actual_to = to_number
+    if actual_to and not actual_to.startswith("whatsapp:"):
+        actual_to = f"whatsapp:{actual_to}"
 
     try:
         client = Client(ACCOUNT_SID, AUTH_TOKEN)
@@ -46,40 +51,36 @@ def send_whatsapp_message(to_number: str, body: str = None, use_template: bool =
         if use_template:
             template_sid = os.getenv("TWILIO_TEMPLATE_SID")
             
-            if not template_sid:
-                logging.error("TWILIO_TEMPLATE_SID not set. Template send requested but SID missing.")
-                return None
-            
-            if not template_vars:
-                logging.error("Template requested but template_vars are missing.")
-                return None
-
-            try:
-                msg = client.messages.create(
-                    from_=actual_from,
-                    content_sid=template_sid,
-                    content_variables=json.dumps(template_vars),
-                    to=actual_to
-                )
-                logging.info(f"WhatsApp template sent to {actual_to}: {msg.sid}")
-                return msg.sid
-            except Exception as template_error:
-                # CRITICAL: If template send fails, we DO NOT fall back to plain text body.
-                # A business-initiated body message will trigger Twilio Error 63016.
-                logging.error(f"Twilio Template Send FAILED: {template_error}")
-                return None
+            if template_sid and template_vars:
+                try:
+                    msg = client.messages.create(
+                        from_=actual_from,
+                        content_sid=template_sid,
+                        content_variables=json.dumps(template_vars),
+                        to=actual_to
+                    )
+                    logging.info(f"WhatsApp template sent to {actual_to}: {msg.sid}")
+                    return msg.sid
+                except Exception as template_error:
+                    logging.warning(f"Template send failed: {template_error}. Falling back to plain text.")
+                    # Fallback: reconstruct message from template vars or use body
+                    if body is None and template_vars:
+                        # Simple concatenation of all variables
+                        body = "\n\n".join([str(v) for v in template_vars.values() if v])
+            else:
+                logging.warning("TWILIO_TEMPLATE_SID not set or no vars. Using plain text fallback.")
         
-        # Plain text mode (for conversational/session messages within 24hr window)
+        # Plain text mode (conversational or fallback)
         if body:
             msg = client.messages.create(
                 from_=actual_from,
                 body=body,
                 to=actual_to
             )
-            logging.info(f"WhatsApp freeform sent to {actual_to}: {msg.sid}")
+            logging.info(f"WhatsApp sent to {actual_to}: {msg.sid}")
             return msg.sid
         else:
-            logging.error("No message body provided for freeform message.")
+            logging.error("No message body provided for send_whatsapp_message.")
             return None
             
     except Exception as e:
