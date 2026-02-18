@@ -69,7 +69,33 @@ def setup_page():
                     <label class="block text-sm font-medium text-gray-700">WhatsApp Number</label>
                     <input type="text" name="phone" placeholder="+1234567890" required 
                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
-                    <p class="text-xs text-gray-500 mt-1">Include country code (e.g., +1...)</p>
+                    <p class="text-xs text-gray-500 mt-1">Include country code (e.g., +91 for India, +1 for USA)</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Your Timezone</label>
+                    <select name="timezone" required
+                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+                        <optgroup label="India">
+                            <option value="Asia/Kolkata">India (IST, UTC+5:30)</option>
+                        </optgroup>
+                        <optgroup label="North America (US, Canada, Mexico)">
+                            <option value="America/New_York">Eastern Time (ET - NY, Toronto, etc.)</option>
+                            <option value="America/Chicago">Central Time (CT - Chicago, Mexico City, etc.)</option>
+                            <option value="America/Denver">Mountain Time (MT - Denver, Calgary, etc.)</option>
+                            <option value="America/Los_Angeles">Pacific Time (PT - LA, Vancouver, etc.)</option>
+                            <option value="America/Mexico_City">Mexico City (CST, UTC-6)</option>
+                        </optgroup>
+                        <optgroup label="Europe &amp; UK">
+                            <option value="Europe/London">London (GMT/BST, UTC+0/+1)</option>
+                            <option value="Europe/Paris">Paris/Berlin/Rome (CET, UTC+1/+2)</option>
+                        </optgroup>
+                        <optgroup label="Other Regions">
+                            <option value="Asia/Singapore">Singapore (SGT, UTC+8)</option>
+                            <option value="Asia/Dubai">Dubai (GST, UTC+4)</option>
+                            <option value="UTC">UTC (Universal Time)</option>
+                        </optgroup>
+                    </select>
+                    <p class="text-xs text-gray-500 mt-1">Meeting times will be shown in this timezone.</p>
                 </div>
                 <button type="submit" 
                         class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
@@ -88,6 +114,16 @@ def register():
         email = request.form.get("email", "").strip().lower()
         raw_phone = request.form.get("phone", "")
         
+        # Timezone: from form, fallback to APP_TIMEZONE env, then UTC
+        user_timezone = request.form.get("timezone", "").strip()
+        if not user_timezone:
+            user_timezone = os.getenv("APP_TIMEZONE", "UTC")
+        import pytz as _pytz
+        try:
+            _pytz.timezone(user_timezone)
+        except Exception:
+            user_timezone = "UTC"
+
         phone = normalize_phone(raw_phone)
         
         # Check if user exists
@@ -102,13 +138,15 @@ def register():
         except Exception as e:
             logging.warning(f"HubSpot sync failed for {email}: {e}")
         
-        # Save to database
+        # Save to database (including timezone)
         if existing:
-            db.execute_query("UPDATE users SET name = ?, phone = ?, hubspot_contact_id = ? WHERE email = ?", 
-                           (name, phone, hubspot_contact_id, email), commit=True)
+            db.execute_query(
+                "UPDATE users SET name = ?, phone = ?, hubspot_contact_id = ?, timezone = ? WHERE email = ?",
+                (name, phone, hubspot_contact_id, user_timezone, email), commit=True)
         else:
-            db.execute_query("INSERT INTO users (email, name, phone, hubspot_contact_id) VALUES (?, ?, ?, ?)", 
-                           (email, name, phone, hubspot_contact_id), commit=True)
+            db.execute_query(
+                "INSERT INTO users (email, name, phone, hubspot_contact_id, timezone) VALUES (?, ?, ?, ?, ?)",
+                (email, name, phone, hubspot_contact_id, user_timezone), commit=True)
         
         # Get bot email addresses from environment
         bot_email_primary = os.getenv("BOT_EMAIL_PRIMARY", "bhattacharyabuddhadeb147@gmail.com")
@@ -119,7 +157,7 @@ def register():
                f"• {bot_email_secondary}")
         whatsapp_service.send_whatsapp_message(phone, msg)
         
-        return f"<h1>Success!</h1><p>{name} is registered. Check WhatsApp for confirmation.</p>"
+        return f"<h1>Success!</h1><p>{name} registered with timezone {user_timezone}. Check WhatsApp!</p>"
     except Exception as e:
         logging.error(f"Registration Error: {e}")
         return f"Error: {e}", 400

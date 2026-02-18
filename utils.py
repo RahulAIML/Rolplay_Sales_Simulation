@@ -60,15 +60,30 @@ def get_current_local_time() -> datetime:
         tz = pytz.utc
     return datetime.now(tz)
 
-def to_local_time(dt: datetime) -> datetime:
-    """Converts an aware datetime to the configured APP_TIMEZONE."""
+def to_user_timezone(dt: datetime, tz_str: str) -> datetime:
+    """
+    Converts an aware UTC datetime to the given IANA timezone string.
+    Falls back to UTC if tz_str is invalid or missing.
+    Examples: 'Asia/Kolkata', 'America/New_York', 'Europe/London'
+    """
     if dt.tzinfo is None:
-        # If naive, assume it's already UTC or localize to UTC first
         dt = pytz.utc.localize(dt)
-    
-    tz_str = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
+    if not tz_str or tz_str.strip() == "":
+        tz_str = "UTC"
     try:
         tz = pytz.timezone(tz_str)
-    except:
+    except Exception:
+        logging.warning(f"Unknown timezone '{tz_str}', falling back to UTC")
         tz = pytz.utc
     return dt.astimezone(tz)
+
+def to_local_time(dt: datetime, tz_str: str = None) -> datetime:
+    """
+    Converts an aware datetime to a timezone.
+    If tz_str is provided, uses that. Otherwise falls back to APP_TIMEZONE env var.
+    This allows per-user timezone support while keeping backward compatibility.
+    """
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt)
+    resolved_tz_str = tz_str or os.getenv("APP_TIMEZONE", "UTC")
+    return to_user_timezone(dt, resolved_tz_str)

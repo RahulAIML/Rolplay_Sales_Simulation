@@ -32,9 +32,12 @@ def generate_coaching_plan(meeting_title: str, client_name: str, client_company:
     - Agenda/Body: {meeting_body}
     - Location: {location}
 
+    IMPORTANT: The Time field above is ALREADY in the organizer's local timezone (abbreviation included, e.g. IST).
+    Do NOT guess or speculate about the timezone. Use the time exactly as given.
+
     TASK:
     Generate a coaching plan in JSON format.
-    1. 'greeting': A motivating, professional greeting.
+    1. 'greeting': A motivating greeting that states the meeting time exactly as given (no timezone guesses).
     2. 'scenario': A 1-sentence summary of what this meeting likely involves based on the title and agenda.
     3. 'steps': 3 concise, actionable bullet points for preparation.
     4. 'recommended_reply': A short, professional acknowledgement message the salesperson can say to you (the bot).

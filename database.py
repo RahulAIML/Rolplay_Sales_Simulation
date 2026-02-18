@@ -127,7 +127,8 @@ class DBHandler:
                     email TEXT PRIMARY KEY,
                     name TEXT,
                     phone TEXT,
-                    hubspot_contact_id TEXT
+                    hubspot_contact_id TEXT,
+                    timezone TEXT DEFAULT 'UTC'
                 );
             """
 
@@ -211,7 +212,8 @@ class DBHandler:
                     email TEXT PRIMARY KEY,
                     name TEXT,
                     phone TEXT,
-                    hubspot_contact_id TEXT
+                    hubspot_contact_id TEXT,
+                    timezone TEXT DEFAULT 'UTC'
                 );
             """
 
@@ -278,6 +280,7 @@ class DBHandler:
                     alter_cmds = [
                         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS hubspot_contact_id TEXT",
                         "ALTER TABLE users ADD COLUMN IF NOT EXISTS hubspot_contact_id TEXT",
+                        "ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'UTC'",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS last_client_reply TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS salesperson_phone TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS summary TEXT",
@@ -326,6 +329,8 @@ class DBHandler:
                     cols = [row['name'] for row in cur.fetchall()]
                     if 'hubspot_contact_id' not in cols:
                         cur.execute("ALTER TABLE users ADD COLUMN hubspot_contact_id TEXT")
+                    if 'timezone' not in cols:
+                        cur.execute("ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'UTC'")
 
                     # Transcripts
                     cur.execute("PRAGMA table_info(meeting_transcripts)")

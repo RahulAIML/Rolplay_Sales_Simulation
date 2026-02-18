@@ -95,12 +95,14 @@ def process_outlook_webhook(data: dict) -> dict:
 
     # 2. Identify Salesperson (User)
     sp_phone = None
+    sp_timezone = None  # Per-user timezone (IANA string, e.g. 'Asia/Kolkata')
     if org_email:
-        # Try finding exact match first
-        user = db.execute_query("SELECT phone FROM users WHERE email = ?", (org_email,), fetch_one=True)
+        # Fetch phone AND timezone together
+        user = db.execute_query("SELECT phone, timezone FROM users WHERE email = ?", (org_email,), fetch_one=True)
         if user:
             sp_phone = user['phone']
-            logging.info(f"Identified User via Organizer ({org_email}): {sp_phone}")
+            sp_timezone = user['timezone'] or None  # May be NULL for old users
+            logging.info(f"Identified User via Organizer ({org_email}): {sp_phone}, tz={sp_timezone}")
         else:
             logging.warning(f"Organizer {org_email} not registered. Ignoring meeting for messaging.")
             # We return 200 to indicate success to Make.com, but we stop processing
@@ -294,7 +296,7 @@ def process_outlook_webhook(data: dict) -> dict:
     aux_token = None
     aux_id = None
     # Extract link from location or body
-    link_pattern = r"(https?://(?:[a-zA-Z0-9-]+\.)?(?:zoom\.us|meet\.google\.com|teams\.(?:live|microsoft)\.com)/[^\s\"<>]+)"
+    link_pattern = r"(https?://(?:[a-zA-Z0-9-]+\.)?(?:zoom\.us|meet\.google\.com|teams\.(?:live|microsoft)\.com|teams\.microsoft\.com/l/meetup-join)/[^\s\"<>]+)"
     
     # Check online_meeting_url first
     meeting_link = meeting.get("online_meeting_url")
@@ -310,16 +312,29 @@ def process_outlook_webhook(data: dict) -> dict:
     
     if meeting_link:
         # Schedule with Aux
+        # IMPORTANT: Pass the UTC ISO string with explicit +00:00 offset so the Aux API
+        # knows the exact moment to join regardless of its server timezone.
         try:
+            # Ensure start_dt is UTC-aware and format with explicit offset
+            import pytz as _pytz
+            if start_dt.tzinfo is None:
+                start_dt_utc = _pytz.utc.localize(start_dt)
+            else:
+                start_dt_utc = start_dt.astimezone(_pytz.utc)
+            # Use explicit UTC ISO format: 2026-02-18T07:20:00+00:00
+            aux_scheduled_time = start_dt_utc.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            logging.info(f"Scheduling Aux bot for UTC time: {aux_scheduled_time} (local: {to_local_time(start_dt_utc).strftime('%Y-%m-%d %H:%M %Z')})")
             aux_res = aux_service.schedule_meeting(
                 meeting_link=meeting_link,
-                scheduled_time=start_dt.isoformat(),
+                scheduled_time=aux_scheduled_time,
                 title=meeting.get("title", "Sales Meeting")
             )
             if aux_res:
                 aux_token = aux_res.get("token")
                 aux_id = aux_res.get("meetingId")
                 logging.info(f"Aux Scheduled: ID={aux_id}, Token={aux_token}")
+            else:
+                logging.warning(f"Aux scheduling returned no result for link: {meeting_link}")
         except Exception as e:
             logging.error(f"Aux scheduling failed: {e}")
 
@@ -346,8 +361,18 @@ def process_outlook_webhook(data: dict) -> dict:
     except Exception as e:
         logging.error(f"HubSpot Summary Sync Failed: {e}")
 
-    # Use Organizer's Local Time for display in WhatsApp
-    display_time = to_local_time(start_dt).strftime("%I:%M %p")
+    # Use Organizer's Personal Timezone for display in WhatsApp
+    # sp_timezone comes from the user's DB record (set at registration).
+    # Falls back to APP_TIMEZONE env var, then UTC — works for ANY timezone worldwide.
+    _local_start = to_local_time(start_dt, tz_str=sp_timezone)
+    _local_end   = to_local_time(end_dt,   tz_str=sp_timezone)
+    _tz_abbr = _local_start.strftime("%Z")  # e.g. "IST", "EST", "GMT"
+    # Full display: "Feb 18, 12:50 PM - 01:20 PM IST"
+    display_time = (
+        f"{_local_start.strftime('%b %d, %I:%M %p')} - "
+        f"{_local_end.strftime('%I:%M %p')} {_tz_abbr}"
+    )
+    logging.info(f"Coaching display time (tz={sp_timezone}): {display_time}")
 
     coaching = ai_service.generate_coaching_plan(
         meeting_title=meeting.get("title", "Meeting"),
@@ -516,11 +541,27 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     loc = m.get('location') or 'Unknown'
     atts = m.get('attendees') or 'Unknown'
     
-    # Try to parse ISO times to readable
+    # Look up salesperson's timezone for correct local time display
+    sp_tz = None
+    try:
+        sp_user = db.execute_query("SELECT timezone FROM users WHERE phone = ?", (sender,), fetch_one=True)
+        if sp_user:
+            sp_tz = sp_user['timezone'] or None
+    except Exception:
+        pass
+
+    # Try to parse ISO times to readable (Localize for Organizer's timezone)
     try:
         s_dt = parse_iso_datetime(start) if start else None
         e_dt = parse_iso_datetime(end) if end else None
-        time_str = f"{s_dt.strftime('%b %d, %I:%M %p')} - {e_dt.strftime('%I:%M %p')}" if s_dt and e_dt else "Unknown Time"
+        if s_dt and e_dt:
+            # Use per-user timezone — falls back to APP_TIMEZONE then UTC
+            s_local = to_local_time(s_dt, tz_str=sp_tz)
+            e_local = to_local_time(e_dt, tz_str=sp_tz)
+            tz_abbr = s_local.strftime("%Z")
+            time_str = f"{s_local.strftime('%b %d, %I:%M %p')} - {e_local.strftime('%I:%M %p')} {tz_abbr}"
+        else:
+            time_str = "Unknown Time"
     except:
         time_str = "Unknown Time"
         
