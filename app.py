@@ -148,13 +148,11 @@ def register():
                 "INSERT INTO users (email, name, phone, hubspot_contact_id, timezone) VALUES (?, ?, ?, ?, ?)",
                 (email, name, phone, hubspot_contact_id, user_timezone), commit=True)
         
-        # Get bot email addresses from environment
-        bot_email_primary = os.getenv("BOT_EMAIL_PRIMARY", "bhattacharyabuddhadeb147@gmail.com")
-        bot_email_secondary = os.getenv("BOT_EMAIL_SECONDARY", "bhattacharyabuddhadeb@outlook.com")
-        msg = (f"🎉 Welcome {name}! You are registered.\n\n"
-               f"To receive coaching, invite BOTH bot accounts to your meetings:\n"
-               f"• {bot_email_primary}\n"
-               f"• {bot_email_secondary}")
+        # Get bot email address from environment
+        bot_email = os.getenv("BOT_EMAIL_SECONDARY", "bhattacharyabuddhadeb@outlook.com")
+        msg = (f"🎉 Welcome Coachlink 360! You are registered.\n\n"
+               f"To receive coaching, invite the bot account to your meetings:\n"
+               f"• {bot_email}")
         whatsapp_service.send_whatsapp_message(phone, msg)
         
         return f"<h1>Success!</h1><p>{name} registered with timezone {user_timezone}. Check WhatsApp!</p>"
