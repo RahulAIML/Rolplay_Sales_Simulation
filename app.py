@@ -161,23 +161,22 @@ def whatsapp_webhook():
     resp.message(response_text)
     return Response(str(resp), mimetype="text/xml")
 
-@app.route('/readai-webhook', methods=['POST'])
-def readai_ingest_webhook():
+@app.route('/api/survey-webhook', methods=['POST'])
+def external_survey_webhook():
+    """
+    Direct endpoint for the survey system to push responses.
+    """
     data = request.json
     if not data:
-        return jsonify({"error": "No data"}), 400
-        
-    try:
-        # Support both Read.ai format and Aux format
-        if "meeting" in data and "transcript" in data["meeting"]:
-            result = meeting_service.process_aux_transcript({}, data["meeting"])
-            return jsonify({"status": "success", "source": "aux_api_detected"}), 200
-            
-        result = meeting_service.process_transcript_webhook(data)
-        return jsonify(result), 200
-    except Exception as e:
-        logging.error(f"ReadAI Ingest Error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": "no data"}), 400
+    
+    logging.info(f"Received external survey data: {data}")
+    
+    # Check if this is a completion notification
+    if data.get("participant_email") and data.get("survey_response"):
+        return survey_completed_webhook()
+    
+    return jsonify({"status": "received", "note": "payload structure did not match completion format"}), 200
 
 @app.route('/api/ingest-raw-meeting', methods=['POST'])
 def ingest_raw_meeting():

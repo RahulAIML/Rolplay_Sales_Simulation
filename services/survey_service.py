@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from services import hubspot_service
 from database import db
 
-SURVEY_API_URL = "https://projects.aux-rolplay.com/coachlink360/api/admin/responses"
+SURVEY_API_URL = "https://projects.aux-rolplay.com/coachlink360/api/webhook"
 
 def poll_and_sync_surveys():
     """

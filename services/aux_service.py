@@ -46,3 +46,18 @@ def get_meeting_status(token):
     except Exception as e:
         logging.error(f"Aux Status Error: {e}")
         return None
+def trigger_survey_webhook(meeting_data):
+    """
+    Triggers the external webhook to send a survey link to the client/organizer.
+    This replaces the Read.ai email flow.
+    """
+    url = f"https://projects.aux-rolplay.com/coachlink360/api/webhook"
+    
+    try:
+        logging.info(f"Triggering survey webhook for meeting {meeting_data.get('meeting_id')}")
+        response = requests.post(url, json=meeting_data, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logging.error(f"Survey Webhook Trigger Error: {e}")
+        return None

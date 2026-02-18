@@ -1,4 +1,5 @@
 import logging
+import os
 import pytz
 from dateutil import parser
 from datetime import datetime, timedelta
@@ -20,20 +21,54 @@ def normalize_phone(phone_number: str) -> str:
 def parse_iso_datetime(date_str: str) -> datetime:
     """
     Parses an ISO date string into a timezone-aware datetime object (UTC).
-    Returns current UTC time + 30m if parsing fails (fallback).
+    If the string is naive (no timezone info), it assumes the APP_TIMEZONE 
+    (from .env, defaults to UTC).
     """
+    # Get app-level default timezone or fallback to UTC
+    # Standardize on UTC for internal logic
+    default_tz_str = os.getenv("APP_TIMEZONE", "Asia/Kolkata") 
+    try:
+        default_tz = pytz.timezone(default_tz_str)
+    except Exception:
+        default_tz = pytz.utc
+
     try:
         if not date_str:
             raise ValueError("Empty date string")
         
         dt = parser.parse(date_str)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=pytz.utc)
-        return dt
+            # Localize naive string to the app default zone
+            dt = default_tz.localize(dt)
+        
+        # Always return UTC for consistent internal comparison
+        return dt.astimezone(pytz.utc)
     except Exception as e:
         logging.warning(f"Date Parse Error ({date_str}): {e}")
-        # Fallback to now
         return datetime.now(pytz.utc)
 
 def get_current_utc_time() -> datetime:
+    """Returns the current aware UTC time."""
     return datetime.now(pytz.utc)
+
+def get_current_local_time() -> datetime:
+    """Returns the current aware local time based on APP_TIMEZONE."""
+    tz_str = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
+    try:
+        tz = pytz.timezone(tz_str)
+    except:
+        tz = pytz.utc
+    return datetime.now(tz)
+
+def to_local_time(dt: datetime) -> datetime:
+    """Converts an aware datetime to the configured APP_TIMEZONE."""
+    if dt.tzinfo is None:
+        # If naive, assume it's already UTC or localize to UTC first
+        dt = pytz.utc.localize(dt)
+    
+    tz_str = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
+    try:
+        tz = pytz.timezone(tz_str)
+    except:
+        tz = pytz.utc
+    return dt.astimezone(tz)

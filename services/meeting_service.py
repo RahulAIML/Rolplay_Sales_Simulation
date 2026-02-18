@@ -2,7 +2,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from database import db
-from utils import normalize_phone, parse_iso_datetime
+from utils import normalize_phone, parse_iso_datetime, to_local_time, get_current_utc_time
 from services import ai_service, whatsapp_service, hubspot_service, transcript_service, aux_service
 
 # Constants
@@ -190,9 +190,9 @@ def process_outlook_webhook(data: dict) -> dict:
     start_str = meeting.get("start_time")
     end_str = meeting.get("end_time")
     
-    # Parse dates
-    start_dt = parse_iso_datetime(start_str) if start_str else datetime.now()
-    end_dt = parse_iso_datetime(end_str) if end_str else datetime.now()
+    # Parse dates (standardized to UTC internally)
+    start_dt = parse_iso_datetime(start_str) if start_str else get_current_utc_time()
+    end_dt = parse_iso_datetime(end_str) if end_str else (start_dt + timedelta(minutes=30))
     
     # Extract Body/Agenda
     body_obj = meeting.get("body")
@@ -323,14 +323,14 @@ def process_outlook_webhook(data: dict) -> dict:
         except Exception as e:
             logging.error(f"Aux scheduling failed: {e}")
 
+    mtg_title = meeting.get("title") or meeting.get("subject") or "Sales Meeting"
+
     # Initial Insert (Updated with Location, Attendees, Summary/Body, and Aux details)
     db.execute_query(
-        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, attendees, summary, aux_meeting_id, aux_meeting_token) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)",
-        (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, attendees_str, meeting_body, aux_id, aux_token),
+        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, attendees, summary, aux_meeting_id, aux_meeting_token, title) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?)",
+        (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, attendees_str, meeting_body, aux_id, aux_token, mtg_title),
         commit=True
     )
-
-    mtg_title = meeting.get("title") or meeting.get("subject") or "Sales Meeting"
 
     # 5. Sync Meeting Summary to HubSpot (NEW)
     try:
@@ -346,11 +346,14 @@ def process_outlook_webhook(data: dict) -> dict:
     except Exception as e:
         logging.error(f"HubSpot Summary Sync Failed: {e}")
 
+    # Use Organizer's Local Time for display in WhatsApp
+    display_time = to_local_time(start_dt).strftime("%I:%M %p")
+
     coaching = ai_service.generate_coaching_plan(
         meeting_title=meeting.get("title", "Meeting"),
         client_name=c_name,
         client_company=client.get("company", "Their Company") if client else "Their Company",
-        start_time=start_dt.strftime("%I:%M %p"),
+        start_time=display_time,
         meeting_body=meeting_body,
         location=location_str
     )

@@ -1,6 +1,7 @@
 import os
 # Updated signature to support templates (force push)
 import logging
+import json
 from twilio.rest import Client
 
 # Configuration
@@ -45,7 +46,7 @@ def send_whatsapp_message(to_number: str, body: str = None, use_template: bool =
                     msg = client.messages.create(
                         from_=FROM_NUMBER,
                         content_sid=template_sid,
-                        content_variables=template_vars,
+                        content_variables=json.dumps(template_vars),
                         to=to_number
                     )
                     logging.info(f"WhatsApp template sent to {to_number}: {msg.sid}")

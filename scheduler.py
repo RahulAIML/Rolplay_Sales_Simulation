@@ -18,8 +18,9 @@ def check_pending_meetings():
     - Now > EndTime + 1 minute.
     """
     from services import survey_service
+    from utils import get_current_utc_time
     
-    now_utc = datetime.now(pytz.utc)
+    now_utc = get_current_utc_time()
     
     meetings = db.execute_query("SELECT * FROM meetings WHERE status = 'scheduled'", fetch_all=True) or []
     
@@ -33,7 +34,7 @@ def check_pending_meetings():
                 start_dt = parse_iso_datetime(m['start_time'])
                 end_dt = start_dt + timedelta(minutes=30)
             
-            # Logic: 1 minute buffer
+            # Logic: 1 minute buffer (Both are UTC aware)
             if now_utc >= (end_dt + timedelta(minutes=1)):
                 target_phone = m['salesperson_phone']
                 
@@ -43,17 +44,38 @@ def check_pending_meetings():
                     db.execute_query("UPDATE meetings SET status = 'reminder_sent' WHERE id = ?", (m['id'],), commit=True)
                     continue
 
-                # Get Client Name
-                crow = db.execute_query("SELECT name FROM clients WHERE id = ?", (m['client_id'],), fetch_one=True)
+                # Get Client Contact Info
+                crow = db.execute_query("SELECT name, email FROM clients WHERE id = ?", (m['client_id'],), fetch_one=True)
                 cname = crow['name'] if crow else "the client"
+                client_email = crow['email'] if crow else None
+
+                # Get Salesperson Email
+                user = db.execute_query("SELECT email FROM users WHERE phone = ?", (target_phone,), fetch_one=True)
+                sp_email = user['email'] if user else None
                 
-                # Send Reminder
+                # Trigger Survey Webhook (Replaces Read.ai email flow)
+                try:
+                    webhook_payload = {
+                        "meeting_id": m['id'],
+                        "aux_meeting_id": m['aux_meeting_id'],
+                        "title": m.get('title', 'Sales Meeting'),
+                        "organizer_email": sp_email,
+                        "client_email": client_email,
+                        "client_name": cname,
+                        "status": "finished"
+                    }
+                    aux_service.trigger_survey_webhook(webhook_payload)
+                    logging.info(f"Survey webhook triggered for meeting {m['id']}")
+                except Exception as e:
+                    logging.error(f"Failed to trigger survey webhook: {e}")
+
+                # Send WhatsApp Reminder
                 msg = f"🔔 Meeting with {cname} finished. How did it go? (Reply 'Done' to log to HubSpot)"
                 whatsapp_service.send_whatsapp_message(target_phone, msg)
                 
                 # Update Status
                 db.execute_query("UPDATE meetings SET status = 'reminder_sent' WHERE id = ?", (m['id'],), commit=True)
-                logging.info(f"Reminder sent for meeting {m['id']}")
+                logging.info(f"Reminder sent and webhook triggered for meeting {m['id']}")
                 
         except Exception as e:
             logging.error(f"Scheduler Job Error {m['id']}: {e}")
