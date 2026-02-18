@@ -34,45 +34,52 @@ def send_whatsapp_message(to_number: str, body: str = None, use_template: bool =
         logging.warning("Attempted to send WhatsApp to empty number.")
         return None
 
+    # Twilio requires 'whatsapp:' prefix for WhatsApp messages
+    # Ensure they are present for both FROM and TO
+    actual_from = FROM_NUMBER if FROM_NUMBER.startswith("whatsapp:") else f"whatsapp:{FROM_NUMBER}"
+    actual_to = to_number if to_number.startswith("whatsapp:") else f"whatsapp:{to_number}"
+
     try:
         client = Client(ACCOUNT_SID, AUTH_TOKEN)
         
         # Template mode for business-initiated messages
-        if use_template and template_vars:
+        if use_template:
             template_sid = os.getenv("TWILIO_TEMPLATE_SID")
             
-            if template_sid:
-                try:
-                    msg = client.messages.create(
-                        from_=FROM_NUMBER,
-                        content_sid=template_sid,
-                        content_variables=json.dumps(template_vars),
-                        to=to_number
-                    )
-                    logging.info(f"WhatsApp template sent to {to_number}: {msg.sid}")
-                    return msg.sid
-                except Exception as template_error:
-                    logging.warning(f"Template send failed: {template_error}. Falling back to plain text.")
-                    # Fallback: reconstruct message from template vars
-                    if body is None:
-                        body = "\n\n".join([v for v in template_vars.values() if v])
-            else:
-                logging.warning("TWILIO_TEMPLATE_SID not set. Using plain text.")
-                # Fallback to plain text
-                if body is None:
-                    body = "\n\n".join([v for v in template_vars.values() if v])
+            if not template_sid:
+                logging.error("TWILIO_TEMPLATE_SID not set. Template send requested but SID missing.")
+                return None
+            
+            if not template_vars:
+                logging.error("Template requested but template_vars are missing.")
+                return None
+
+            try:
+                msg = client.messages.create(
+                    from_=actual_from,
+                    content_sid=template_sid,
+                    content_variables=json.dumps(template_vars),
+                    to=actual_to
+                )
+                logging.info(f"WhatsApp template sent to {actual_to}: {msg.sid}")
+                return msg.sid
+            except Exception as template_error:
+                # CRITICAL: If template send fails, we DO NOT fall back to plain text body.
+                # A business-initiated body message will trigger Twilio Error 63016.
+                logging.error(f"Twilio Template Send FAILED: {template_error}")
+                return None
         
-        # Plain text mode (default for conversational messages)
+        # Plain text mode (for conversational/session messages within 24hr window)
         if body:
             msg = client.messages.create(
-                from_=FROM_NUMBER,
+                from_=actual_from,
                 body=body,
-                to=to_number
+                to=actual_to
             )
-            logging.info(f"WhatsApp sent to {to_number}: {msg.sid}")
+            logging.info(f"WhatsApp freeform sent to {actual_to}: {msg.sid}")
             return msg.sid
         else:
-            logging.error("No message body or template provided.")
+            logging.error("No message body provided for freeform message.")
             return None
             
     except Exception as e:
