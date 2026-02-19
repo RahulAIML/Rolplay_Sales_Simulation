@@ -9,16 +9,68 @@ from services import ai_service, whatsapp_service, hubspot_service, transcript_s
 ADMIN_WHATSAPP_TO = os.getenv("ADMIN_WHATSAPP_TO")
 
 def _get_val(d: dict, keys: list, default=None):
-    """Aux helper to get value from directory by trying multiple key variations."""
-    if not d: return default
+    """Aux helper to get value from dictionary by trying multiple key variations."""
+    if not (d and isinstance(d, dict)): return default
+    
+    # Priority 1: Exact match
     for k in keys:
         if k in d: return d[k]
-        # Try lowercase and normalized
-        k_norm = k.lower().replace(" ", "_")
-        for dk, dv in d.items():
-            if dk.lower().replace(" ", "_").replace("-", "") == k_norm.replace("-", ""):
-                 return dv
+        
+    # Priority 2: Normalized match (handles camelCase, spaces, etc.)
+    # We strip underscores and spaces and go lowercase
+    def normalize(s):
+        return s.lower().replace("_", "").replace("-", "").replace(" ", "")
+
+    normalized_keys = [normalize(k) for k in keys]
+    for dk, dv in d.items():
+        if normalize(dk) in normalized_keys:
+            return dv
+            
     return default
+
+def _extract_meeting_link(text: str) -> str:
+    """Detects meeting platform link, unwrapping safelinks if needed."""
+    if not text: return None
+    import re
+    import urllib.parse
+
+    # 1. Any URL pattern
+    url_pattern = r"(https?://[^\s\"<>]+)"
+    urls = re.findall(url_pattern, text)
+    
+    platforms = ['zoom.us', 'zoom.com', 'meet.google.com', 'teams.microsoft.com', 'teams.live.com']
+    
+    for url in urls:
+        candidate = None
+        
+        # Check if it's an Outlook Safelink
+        if "safelinks.protection.outlook.com" in url or "url=" in url.lower():
+            try:
+                parsed = urllib.parse.urlparse(url)
+                params = urllib.parse.parse_qs(parsed.query)
+                # 'url' param usually contains the original link
+                inner_url = params.get('url', [None])[0]
+                if inner_url:
+                    for p in platforms:
+                        if p in inner_url.lower():
+                            candidate = inner_url
+                            break
+            except Exception: pass
+            
+        # Check directly if not a safelink or safelink parsing failed
+        if not candidate:
+            for p in platforms:
+                if p in url.lower():
+                    candidate = url
+                    break
+        
+        if candidate:
+            # Clean up trailing characters (sometimes regex captures too much)
+            if candidate.endswith(('"', "'", ")", "]", ".")):
+                candidate = candidate[:-1]
+            return candidate
+            
+    return None
 
 def process_outlook_webhook(data: dict) -> dict:
     """
@@ -177,19 +229,16 @@ def process_outlook_webhook(data: dict) -> dict:
         logging.error(f"HubSpot Sync Summary Error: {e}")
 
     # 7.3. Aux API Scheduling
+    # 7.3.1. Get link (Direct or search)
     meeting_link = _get_val(meeting_raw, ["online_meeting_url", "onlineMeetingUrl", "joinUrl", "join_url"])
+    
     if not meeting_link:
         # Search in location and body
-        import re
-        # Improved pattern for Zoom, Meet, Teams (including zoom.com and live teams)
-        link_pattern = r"(https?://(?:[a-zA-Z0-9-]+\.)?(?:zoom\.us|zoom\.com|meet\.google\.com|teams\.(?:live|microsoft)\.com|teams\.microsoft\.com/l/meetup-join)/[^\s\"<>]+)"
-        combined_text = f"{location_str} {meeting_body}"
-        match = re.search(link_pattern, combined_text)
-        if match: 
-            meeting_link = match.group(1)
-            logging.info(f"Detected meeting link in text: {meeting_link}")
+        meeting_link = _extract_meeting_link(f"{location_str} {meeting_body}")
+        if meeting_link:
+            logging.info(f"Detected meeting link from text: {meeting_link}")
         else:
-            logging.warning(f"No meeting link found in location or body for {mtg_title}. Content snippet: {combined_text[:100]}...")
+            logging.warning(f"No meeting link found in location or body for {mtg_title}.")
 
     if meeting_link:
         try:
