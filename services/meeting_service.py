@@ -189,15 +189,26 @@ def process_outlook_webhook(data: dict) -> dict:
 
     mtg_title = _get_val(meeting_raw, ["title", "subject"], "Sales Meeting")
 
-    logging.info(f"Generating coaching for {mtg_title} at {display_time}...")
-    coaching = ai_service.generate_coaching_plan(
-        meeting_title=mtg_title,
-        client_name=c_name,
-        client_company=_get_val(client_raw, ["company"], "Prospect"),
-        start_time=display_time,
-        meeting_body=meeting_body,
-        location=location_str
-    )
+    # SAFE AI GENERATION: Don't let 429 quota errors break the code
+    coaching = None
+    try:
+        logging.info(f"Generating coaching for {mtg_title} at {display_time}...")
+        coaching = ai_service.generate_coaching_plan(
+            meeting_title=mtg_title,
+            client_name=c_name,
+            client_company=_get_val(client_raw, ["company"], "Prospect"),
+            start_time=display_time,
+            meeting_body=meeting_body,
+            location=location_str
+        )
+    except Exception as ai_err:
+        logging.error(f"AI Coaching Generation Failed (Likely Quota): {ai_err}")
+        coaching = {
+            "greeting": f"Hello! Ready for your meeting with {c_name}?",
+            "scenario": "Upcoming Sales Call",
+            "steps": ["Review recent notes", "Confirm meeting link", "Set clear objectives"],
+            "recommended_reply": "Looking forward to our chat!"
+        }
 
     # 7. SEND COACHING (Priority)
     msg_body = (
@@ -247,8 +258,12 @@ def process_outlook_webhook(data: dict) -> dict:
                 logging.info(f"Bot successfully scheduled! Aux ID: {aux_res.get('meetingId')}")
                 db.execute_query("UPDATE meetings SET aux_meeting_id=?, aux_meeting_token=? WHERE outlook_event_id=?", 
                                (aux_res.get("meetingId"), aux_res.get("token"), mtg_id), commit=True)
+            else:
+                logging.error(f"Bot Join Scheduling returned failure for {mtg_title}")
         except Exception as e:
             logging.error(f"Bot Join Exception: {e}")
+    else:
+        logging.warning(f"No meeting link found for {mtg_title}. Bot cannot join.")
 
     return {"status": "success"}
 
@@ -310,6 +325,7 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     # Command: DONE
     if "done" in message_body.lower() or "completed" in message_body.lower():
         db.execute_query("UPDATE meetings SET status='completed' WHERE id=?", (m['id'],), commit=True)
+        hubspot_service = __import__('services.hubspot_service', fromlist=['sync_note_to_contact'])
         hubspot_service.sync_note_to_contact(m['client_id'], f"Feedback: {message_body}")
         
         return "✅ Meeting marked as completed notes synced to CRM."
@@ -395,7 +411,7 @@ def process_transcript_webhook(data: dict):
     url = data.get("transcript_url")
     
     if not (title and time_str and url):
-        raise ValueError("Missing title, time, or url")
+        return {"status": "error", "message": "Missing title, time, or url"}
 
     # 1. Find Meeting
     webhook_dt = parse_iso_datetime(time_str)
@@ -429,6 +445,7 @@ def process_transcript_webhook(data: dict):
     # 3. Process
     return process_transcript_data(matched_meeting, content, title, source, url)
 
+
 def process_aux_transcript(meeting_row, aux_data):
     """
     Processes transcript data specifically from the Aux API response.
@@ -444,62 +461,73 @@ def process_aux_transcript(meeting_row, aux_data):
     res = process_transcript_data(meeting_row, content, title, source="aux_api")
     return res.get("status") == "processed"
 
+
 def process_transcript_data(meeting_row, transcript_content, title, source, transcript_url=None):
     """
     Core logic to parse, store, analyze and notify regarding a transcript.
     """
     meeting_id = meeting_row['id']
+    logging.info(f"Processing transcript for meeting {meeting_id} from {source}")
     
     # 1. Parse
     lines = transcript_service.parse_transcript(transcript_content)
     
     # 2. Store
     transcript_service.store_transcript(meeting_id, lines, source=source)
+    logging.info(f"Stored {len(lines)} lines of transcript for meeting {meeting_id}")
     
-    # 3. Analyze
+    # 3. Analyze (SAFE AI CALL)
     full_text = transcript_service.get_full_transcript_text(lines)
-    analysis = ai_service.generate_post_meeting_analysis(full_text)
-    
+    analysis = None
+    try:
+        analysis = ai_service.generate_post_meeting_analysis(full_text)
+    except Exception as e:
+        logging.error(f"Post-meeting AI analysis failed for meeting {meeting_id}: {e}")
+
     # 4. Notify
     phone = meeting_row['salesperson_phone']
     if phone and analysis:
-        # Format Report
-        objections = "\n".join([f"• \"{o['quote']}\"" for o in analysis.get('objections', [])]) or "None detected."
-        next_steps = "\n".join([f"• {s}" for s in analysis.get('follow_up_actions', [])])
-        
-        template_vars = {
-            "1": f"🧠 *Post-Meeting Analysis ({title})*",
-            "2": f"🛑 *Objections*:\n{objections}\n\n📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
-            "3": f"⚠️ *Risks*: {len(analysis.get('risks', []))} identified\n\n🚀 *Next Steps*:\n{next_steps}",
-            "4": "👉 Reply *Done* after you have followed up."
-        }
-        
-        msg_body = (
-            f"🧠 *Post-Meeting Analysis ({title})*\n\n"
-            f"🛑 *Objections*:\n{objections}\n\n"
-            f"📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
-            f"⚠️ *Risks*: {len(analysis.get('risks', []))} identified\n\n"
-            f"🚀 *Next Steps*:\n{next_steps}\n\n"
-            f"👉 Reply *Done* after you have followed up."
-        )
-        
-        whatsapp_service.send_whatsapp_message(
-            phone,
-            body=msg_body,
-            use_template=True,
-            template_vars=template_vars
-        )
+        try:
+            # Format Report
+            objections = "\n".join([f"• \"{o['quote']}\"" for o in analysis.get('objections', [])]) or "None detected."
+            next_steps = "\n".join([f"• {s}" for s in analysis.get('follow_up_actions', [])])
+            
+            template_vars = {
+                "1": f"🧠 *Post-Meeting Analysis ({title})*",
+                "2": f"🛑 *Objections*:\n{objections}\n\n📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
+                "3": f"⚠️ *Risks*: {len(analysis.get('risks', []))} identified\n\n🚀 *Next Steps*:\n{next_steps}",
+                "4": "👉 Reply *Done* after you have followed up."
+            }
+            
+            msg_body = (
+                f"🧠 *Post-Meeting Analysis ({title})*\n\n"
+                f"🛑 *Objections*:\n{objections}\n\n"
+                f"📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
+                f"⚠️ *Risks*: {len(analysis.get('risks', []))} identified\n\n"
+                f"🚀 *Next Steps*:\n{next_steps}\n\n"
+                f"👉 Reply *Done* after you have followed up."
+            )
+            
+            whatsapp_service.send_whatsapp_message(
+                phone,
+                body=msg_body,
+                use_template=True,
+                template_vars=template_vars
+            )
+        except Exception as notify_err:
+            logging.error(f"Failed to send post-meeting notification: {notify_err}")
 
-    # 5. Log to HubSpot
-    try:
-        hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis'])
-        hubspot_service.sync_meeting_analysis(
-            client_db_id=meeting_row['client_id'],
-            meeting_title=title,
-            analysis=analysis,
-            transcript_url=transcript_url or "Stored in Database"
-        )
-    except Exception as e:
-        logging.error(f"HubSpot Analysis Sync Failed: {e}")
+    # 5. Log to HubSpot (SAFE SYNC)
+    if analysis:
+        try:
+            hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis'])
+            hubspot_service.sync_meeting_analysis(
+                client_db_id=meeting_row['client_id'],
+                meeting_title=title,
+                analysis=analysis,
+                transcript_url=transcript_url or "Stored in Database"
+            )
+        except Exception as e:
+            logging.error(f"HubSpot Analysis Sync Failed: {e}")
         
     return {"status": "processed", "meeting_id": meeting_id}
