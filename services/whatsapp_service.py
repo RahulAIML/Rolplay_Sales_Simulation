@@ -63,7 +63,10 @@ def send_whatsapp_message(to_number: str, body: str = None, use_template: bool =
                     return msg.sid
                 except Exception as template_error:
                     logging.warning(f"Template send failed: {template_error}. Falling back to plain text.")
-                    # Fallback: reconstruct message from template vars or use body
+                    if "21656" in str(template_error):
+                        logging.error("Twilio Error 21656: Invalid ContentVariables mapping. Please verify template placeholders match variable count.")
+                    
+                    # Fallback: reconstruct message from template vars or use body if already set
                     if body is None and template_vars:
                         # Simple concatenation of all variables
                         body = "\n\n".join([str(v) for v in template_vars.values() if v])

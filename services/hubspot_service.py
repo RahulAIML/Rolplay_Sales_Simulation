@@ -99,10 +99,10 @@ def _create_ticket(contact_id: str, subject: str, content: str, priority: str = 
     try:
         properties = {
             "subject": subject,
-            "content": content,
+            "hs_ticket_priority": priority,
             "hs_pipeline_stage": "1", # Default stage
             "hs_pipeline": "0",       # Default pipeline
-            "hs_ticket_priority": priority
+            "content": content
         }
         
         batch_input = SimplePublicObjectInputForCreate(
@@ -118,6 +118,38 @@ def _create_ticket(contact_id: str, subject: str, content: str, priority: str = 
         return True
     except Exception as e:
         logging.error(f"HubSpot Ticket Creation Error: {e}")
+        return False
+
+def _create_note(contact_id: str, content: str):
+    """
+    Helper to create a Note and associate it with a contact.
+    """
+    hubspot = get_client()
+    if not hubspot or not contact_id:
+        return False
+        
+    try:
+        # Notes properties
+        properties = {
+            "hs_note_body": content.replace("\n", "<br>"), # HTML for notes
+            "hs_timestamp": datetime.now(pytz.utc).isoformat()
+        }
+        
+        # Note to Contact association is 202
+        batch_input = SimplePublicObjectInputForCreate(
+            properties=properties,
+            associations=[{
+                "to": {"id": contact_id},
+                "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 202}]
+            }]
+        )
+        
+        # Notes are under crm.objects.notes
+        result = hubspot.crm.objects.notes.basic_api.create(simple_public_object_input_for_create=batch_input)
+        logging.info(f"HubSpot: Note created (ID: {result.id}) for contact {contact_id}")
+        return True
+    except Exception as e:
+        logging.error(f"HubSpot Note Creation Error: {e}")
         return False
 
 def sync_survey_response_to_contact(participant_email: str, survey_data: dict):
@@ -168,7 +200,11 @@ def sync_survey_response_to_contact(participant_email: str, survey_data: dict):
         if survey_data.get('improvements'):
             ticket_content += f"**Improvements:** {survey_data.get('improvements')}\n"
     
-    return _create_ticket(contact_id, ticket_subject, ticket_content, priority="MEDIUM")
+    # Try Note First, Fallback to Ticket
+    success = _create_note(contact_id, ticket_content)
+    if not success:
+        return _create_ticket(contact_id, ticket_subject, ticket_content, priority="MEDIUM")
+    return True
 
 def sync_note_to_contact(client_db_id: int, note_body: str):
     """
@@ -189,8 +225,11 @@ def sync_note_to_contact(client_db_id: int, note_body: str):
             db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_id, client_db_id), commit=True)
 
     if hs_id:
-        ticket_subject = f"Meeting Feedback: {row['name'] or 'Client'}"
-        _create_ticket(hs_id, ticket_subject, note_body)
+        subject = f"Meeting Feedback: {row['name'] or 'Client'}"
+        # Try Note first
+        success = _create_note(hs_id, note_body)
+        if not success:
+            _create_ticket(hs_id, subject, note_body, priority="LOW")
 
 def sync_meeting_analysis(client_db_id: int, meeting_title: str, analysis: dict, transcript_url: str):
     """
@@ -233,7 +272,11 @@ def sync_meeting_analysis(client_db_id: int, meeting_title: str, analysis: dict,
     
     subject = f"Meeting Analysis: {meeting_title}"
     
-    return _create_ticket(hs_id, subject, content, priority="HIGH")
+    # Try Note first
+    success = _create_note(hs_id, content)
+    if not success:
+        return _create_ticket(hs_id, subject, content, priority="HIGH")
+    return True
 
 def get_contact_details(contact_id: str):
     """
@@ -290,5 +333,9 @@ def sync_meeting_summary(client_db_id: int, meeting_title: str, start_time: str,
             f"**Location**: {location}\n\n"
             f"📝 **Agenda/Summary**:\n{summary}"
         )
-        return _create_ticket(hs_id, subject, content, priority="LOW")
+        # Try Note first
+        success = _create_note(hs_id, content)
+        if not success:
+            return _create_ticket(hs_id, subject, content, priority="LOW")
+        return True
 
