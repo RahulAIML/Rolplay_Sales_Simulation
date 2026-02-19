@@ -17,17 +17,25 @@ def schedule_meeting(meeting_link, scheduled_time, title):
     }
     
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
+        logging.info(f"Aux API Request: POST {url} | Payload: {payload}")
+        response = requests.post(url, json=payload, timeout=15)
+        
+        if response.status_code != 200:
+            logging.error(f"Aux API Error: Status {response.status_code} | Body: {response.text}")
+            return None
+            
         data = response.json()
         if data.get("success"):
+            logging.info(f"Aux API Success: ID={data.get('meetingId')} Token={data.get('meetingToken')}")
             return {
                 "meetingId": data.get("meetingId"),
                 "token": data.get("meetingToken")
             }
-        return None
+        else:
+            logging.error(f"Aux API Success=False | Body: {data}")
+            return None
     except Exception as e:
-        logging.error(f"Aux Schedule Error: {e}")
+        logging.error(f"Aux API Exception: {e}")
         return None
 
 def get_meeting_status(token):
