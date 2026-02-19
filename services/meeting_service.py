@@ -88,125 +88,118 @@ def _extract_email(o):
 def process_outlook_webhook(data: dict) -> dict:
     """
     Main entry point for processing webhook data from Make.com.
-    Orchestrates: Parser -> DB -> AI -> WhatsApp -> Background Sync (Aux/HubSpot).
+    Orchestrates: Parser -> DB -> AI -> WhatsApp -> Background Sync (Aux/Bot).
     """
-    logging.info(f"Processing Webhook: {data}")
+    logging.info(f"Processing Webhook | Payload Keys: {list(data.keys())}")
 
-    # 1. Parse & Validate (REVERTED TO WORKING VERSION)
-    meeting = data.get("meeting") or data.get("Meeting Payload")
-    if meeting:
-        normalized = {}
-        for k, v in meeting.items():
-            normalized[k.lower().replace(" ", "_")] = v
-        meeting = normalized
-
-    if not meeting:
-        logging.error(f"Webhook Error: Missing 'meeting' data in payload.")
+    # 1. Extract Meeting Data
+    meeting_raw = _get_val(data, ["meeting", "Meeting Payload", "event", "payload"])
+    if not meeting_raw:
+        logging.error(f"Webhook Error: Missing meeting data. Payload: {data}")
         return {"status": "ignored", "message": "Missing meeting data"}, 200
 
-    client_data = data.get("client") or data.get("Client")
-    if client_data:
-        curr_client = {}
-        for k, v in client_data.items():
-            curr_client[k.lower().replace(" ", "_")] = v
-        client_data = curr_client
+    logging.info(f"Meeting Data Found | Keys: {list(meeting_raw.keys()) if isinstance(meeting_raw, dict) else 'non-dict'}")
 
-    # Organizer Email (Key for User Lookup)
-    organizer = meeting.get("organizer", {})
-    org_email = None
-    if isinstance(organizer, dict):
-        org_email = organizer.get("email") or organizer.get("address")
-    else:
-        org_email = str(organizer)
+    # 2. Extract Organizer (Salesperson)
+    organizer = _get_val(meeting_raw, ["organizer", "organizer_email", "owner", "organizer_address"])
+    org_email = _extract_email(organizer)
+    
+    if not org_email:
+        # Fallback: check if it's a field directly in meeting_raw
+        org_email = _get_val(meeting_raw, ["organizer_email", "organizerEmail"])
 
-    # 2. Identify Salesperson (User)
+    logging.info(f"Extracted Organizer Email: {org_email}")
+
+    # 3. Identify Salesperson (User)
     user = db.execute_query("SELECT phone, timezone FROM users WHERE email = ?", (org_email,), fetch_one=True)
     if not user:
-        logging.warning(f"Organizer {org_email} not registered. Ignoring.")
-        return {"status": "ignored", "message": "Organizer not registered"}, 200
+        # Try finding ANY registered user to not block (Temporary for debugging)
+        logging.warning(f"Organizer {org_email} not registered. Registered users: {[r['email'] for r in db.execute_query('SELECT email FROM users', fetch_all=True)]}")
+        return {"status": "ignored", "message": f"Organizer {org_email} not registered"}, 200
 
     sp_phone = user['phone']
     sp_timezone = user['timezone']
+    logging.info(f"Found Salesperson: {org_email} -> {sp_phone} ({sp_timezone})")
 
-    # 3. Save/Update Client
+    # 4. Extract Client Data
+    client_raw = _get_val(data, ["client", "Client", "participant", "contact"])
+    c_email = _extract_email(client_raw)
+    
+    if not c_email:
+        # Look in attendees
+        attendees = _get_val(meeting_raw, ["attendees"], [])
+        if isinstance(attendees, list) and len(attendees) > 0:
+            # Pick first attendee that isn't the organizer
+            for att in attendees:
+                ae = _extract_email(att)
+                if ae and ae != org_email:
+                    c_email = ae
+                    logging.info(f"Found client email in attendees: {c_email}")
+                    break
+
+    c_name = _get_val(client_raw, ["name", "displayName", "fullName", "first_name"], "Valued Client")
+    logging.info(f"Client Identified: {c_name} <{c_email}>")
+
+    # 5. DB & HubSpot Sync (Pre-Coaching)
     client_id = None
-    c_name = "Valued Client"
-    c_email = client_data.get("email") if client_data else None
-
-    if client_data and c_email:
-        # Combine names
-        first = client_data.get('first_name')
-        last = client_data.get('last_name')
-        if first or last:
-            c_name = f"{first or ''} {last or ''}".strip()
-        else:
-            c_name = client_data.get('name', 'Valued Client')
-
-        # DB Logic
-        c_exist = db.execute_query("SELECT id, hubspot_contact_id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
+    if c_email:
+        c_exist = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
         if c_exist:
             client_id = c_exist['id']
-            db.execute_query("UPDATE clients SET name=?, company=? WHERE email=?", (c_name, client_data.get("company"), c_email), commit=True)
+            db.execute_query("UPDATE clients SET name=? WHERE email=?", (c_name, c_email), commit=True)
         else:
-            db.execute_query("INSERT INTO clients (email, name, company) VALUES (?, ?, ?)", (c_email, c_name, client_data.get("company")), commit=True)
+            db.execute_query("INSERT INTO clients (email, name) VALUES (?, ?)", (c_email, c_name), commit=True)
             res = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
             client_id = res['id']
 
-    # 4. HubSpot Enrichment
-    hs_contact_id = None
     hs_context_str = ""
     if client_id and c_email:
         try:
             hubspot_service = __import__('services.hubspot_service', fromlist=['create_or_find_contact', 'get_contact_details'])
-            hs_contact_id = hubspot_service.create_or_find_contact(c_email, c_name, client_data.get("phone", ""))
+            hs_contact_id = hubspot_service.create_or_find_contact(c_email, c_name, _get_val(client_raw, ["phone", "phoneNumber"], ""))
             if hs_contact_id:
                 db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_contact_id, client_id), commit=True)
-                # Fetch deeper details for AI
                 hs_details = hubspot_service.get_contact_details(hs_contact_id)
                 if hs_details:
                     hs_context_str = "\n\n[HubSpot context]\n"
-                    for k in ['jobtitle', 'company', 'industry', 'lifecyclestage', 'notes_last_updated']:
+                    for k in ['jobtitle', 'company', 'industry', 'lifecyclestage']:
                         if hs_details.get(k): hs_context_str += f"{k.capitalize()}: {hs_details.get(k)}\n"
         except Exception as e:
             logging.error(f"HubSpot Enrichment Error: {e}")
 
-    # 5. Prepare Coaching Plan
-    start_str = meeting.get("start_time")
-    end_str = meeting.get("end_time")
+    # 6. Prepare Coaching Plan
+    start_str = _get_val(meeting_raw, ["start_time", "startDateTime", "start"])
     start_dt = parse_iso_datetime(start_str) if start_str else get_current_utc_time()
-    end_dt = parse_iso_datetime(end_str) if end_str else (start_dt + timedelta(minutes=30))
-
-    # Parse Body
-    body_obj = meeting.get("body")
-    meeting_body = ""
+    
+    # Body parsing
+    body_obj = _get_val(meeting_raw, ["body", "content", "description"])
     if isinstance(body_obj, dict):
         meeting_body = body_obj.get("content") or body_obj.get("Content") or ""
     else:
         meeting_body = str(body_obj or "")
     
-    # Enrichment
     meeting_body += hs_context_str
+    
+    loc_obj = _get_val(meeting_raw, ["location", "place"])
+    location_str = loc_obj.get("display_name") if isinstance(loc_obj, dict) else str(loc_obj or "Online")
 
-    loc_obj = meeting.get("location")
-    location_str = loc_obj.get("display_name") if isinstance(loc_obj, dict) else str(loc_obj or "Unknown")
-
-    # Display Time
+    # Time display
     _local_start = to_local_time(start_dt, tz_str=sp_timezone)
-    _local_end   = to_local_time(end_dt,   tz_str=sp_timezone)
-    display_time = f"{_local_start.strftime('%b %d, %I:%M %p')} - {_local_end.strftime('%I:%M %p')} {_local_start.strftime('%Z')}"
+    display_time = _local_start.strftime('%b %d, %I:%M %p %Z')
 
-    mtg_title = meeting.get("title") or meeting.get("subject") or "Upcoming Meeting"
+    mtg_title = _get_val(meeting_raw, ["title", "subject"], "Sales Meeting")
 
+    logging.info(f"Generating coaching for {mtg_title} at {display_time}...")
     coaching = ai_service.generate_coaching_plan(
         meeting_title=mtg_title,
         client_name=c_name,
-        client_company=client_data.get("company", "Their Company") if client_data else "Their Company",
+        client_company=_get_val(client_raw, ["company"], "Prospect"),
         start_time=display_time,
         meeting_body=meeting_body,
         location=location_str
     )
 
-    # 6. SEND COACHING IMMEDIATELY
+    # 7. SEND COACHING (Priority)
     msg_body = (
         f"🚀 *New Meeting: {mtg_title}*\n"
         f"{coaching.get('greeting')}\n\n"
@@ -218,62 +211,44 @@ def process_outlook_webhook(data: dict) -> dict:
     template_vars = {
         "1": f"🚀 *{mtg_title}*",
         "2": f"{coaching.get('greeting')}\n\n🎯 {coaching.get('scenario')}",
-        "3": f"📋 *Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", []))[:200], # Twilio var limit
+        "3": f"📋 *Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", []))[:200],
         "4": f"💡 {coaching.get('recommended_reply')}"
     }
     
     whatsapp_service.send_whatsapp_message(sp_phone, body=msg_body, use_template=True, template_vars=template_vars)
-    logging.info(f"Coaching sent immediately to {sp_phone}")
+    logging.info(f"Coaching sent to {sp_phone}")
 
-    # 7. Background / Slower Tasks
-    # 7.1. Save Meeting
-    mtg_id = meeting.get("meeting_id") or meeting.get("id")
+    # 8. POST-COACHING TASKS (Save & Bot Join)
+    mtg_id = _get_val(meeting_raw, ["meeting_id", "id", "eventId", "outlook_id"])
     if not mtg_id:
         import uuid
         mtg_id = f"gen_{str(uuid.uuid4())[:8]}"
-    
-    atts = meeting.get("attendees", [])
-    atts_str = ", ".join([str(a) for a in atts]) if isinstance(atts, list) else str(atts)
 
     existing_mtg = db.execute_query("SELECT id FROM meetings WHERE outlook_event_id = ?", (mtg_id,), fetch_one=True)
     if not existing_mtg:
         db.execute_query(
-            "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, attendees, summary, title) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?)",
-            (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, atts_str, meeting_body, mtg_title),
+            "INSERT INTO meetings (outlook_event_id, start_time, client_id, status, salesperson_phone, location, title) VALUES (?, ?, ?, 'scheduled', ?, ?, ?)",
+            (mtg_id, start_dt, client_id, sp_phone, location_str, mtg_title),
             commit=True
         )
-    
-    # 7.2. Sync Meeting Summary to HubSpot
-    try:
-        hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_summary'])
-        hubspot_service.sync_meeting_summary(client_db_id=client_id, meeting_title=mtg_title, start_time=str(start_dt), summary=meeting_body, location=location_str)
-    except Exception as e:
-        logging.error(f"HubSpot Sync Summary Error: {e}")
 
-    # 7.3. Aux API Scheduling (ROBUST VERSION)
-    meeting_link = meeting.get("online_meeting_url") or meeting.get("join_url")
+    # 9. Bot Join Scheduling
+    meeting_link = _get_val(meeting_raw, ["online_meeting_url", "join_url", "onlineMeetingUrl"])
     if not meeting_link:
-        # Search in location and body using the new robust helper
         meeting_link = _extract_meeting_link(f"{location_str} {meeting_body}")
-        if meeting_link:
-            logging.info(f"Detected meeting link from text: {meeting_link}")
 
     if meeting_link:
         try:
             import pytz
             start_dt_utc = start_dt.astimezone(pytz.utc) if start_dt.tzinfo else pytz.utc.localize(start_dt)
-            logging.info(f"Scheduling Aux Bot for {mtg_title} at {start_dt_utc} | Link: {meeting_link}")
+            logging.info(f"Attempting to schedule bot join... Link: {meeting_link}")
             aux_res = aux_service.schedule_meeting(meeting_link, start_dt_utc.strftime("%Y-%m-%dT%H:%M:%S+00:00"), mtg_title)
             if aux_res:
-                logging.info(f"Aux Bot Scheduled Successfully: ID={aux_res.get('meetingId')}")
+                logging.info(f"Bot successfully scheduled! Aux ID: {aux_res.get('meetingId')}")
                 db.execute_query("UPDATE meetings SET aux_meeting_id=?, aux_meeting_token=? WHERE outlook_event_id=?", 
                                (aux_res.get("meetingId"), aux_res.get("token"), mtg_id), commit=True)
-            else:
-                logging.error(f"Aux Bot Scheduling FAILED (API returned None) for {mtg_title}")
         except Exception as e:
-            logging.error(f"Aux Schedule Error for {mtg_title}: {e}")
-    else:
-        logging.warning(f"Skipping Aux Bot scheduling for {mtg_title} (no link found).")
+            logging.error(f"Bot Join Exception: {e}")
 
     return {"status": "success"}
 
