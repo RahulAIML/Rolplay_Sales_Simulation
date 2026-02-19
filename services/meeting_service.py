@@ -72,23 +72,47 @@ def _extract_meeting_link(text: str) -> str:
             
     return None
 
+def _extract_email(o):
+    """Deeply extracts email from various nested formats."""
+    if not o: return None
+    if isinstance(o, str): return o.strip().lower()
+    if isinstance(o, list) and len(o) > 0: return _extract_email(o[0])
+    if isinstance(o, dict):
+        # Try common keys
+        res = _get_val(o, ["email", "address", "emailAddress", "email_address"])
+        if res:
+            if isinstance(res, dict): return _extract_email(res)
+            return str(res).strip().lower()
+    return None
+
 def process_outlook_webhook(data: dict) -> dict:
     """
     Main entry point for processing webhook data from Make.com.
     Orchestrates: Parser -> DB -> AI -> WhatsApp -> Background Sync (Aux/HubSpot).
     """
-    logging.info(f"Processing Webhook: {list(data.keys())}")
+    logging.info(f"Processing Webhook: {data}")
 
-    # 1. Parse & Validate
-    meeting_raw = data.get("meeting") or data.get("Meeting Payload") or data.get("event")
-    if not meeting_raw:
-        logging.error(f"Webhook Error: Missing 'meeting' data in payload. Keys: {list(data.keys())}")
+    # 1. Parse & Validate (REVERTED TO WORKING VERSION)
+    meeting = data.get("meeting") or data.get("Meeting Payload")
+    if meeting:
+        normalized = {}
+        for k, v in meeting.items():
+            normalized[k.lower().replace(" ", "_")] = v
+        meeting = normalized
+
+    if not meeting:
+        logging.error(f"Webhook Error: Missing 'meeting' data in payload.")
         return {"status": "ignored", "message": "Missing meeting data"}, 200
 
-    client_raw = data.get("client") or data.get("Client") or data.get("participant")
-    
+    client_data = data.get("client") or data.get("Client")
+    if client_data:
+        curr_client = {}
+        for k, v in client_data.items():
+            curr_client[k.lower().replace(" ", "_")] = v
+        client_data = curr_client
+
     # Organizer Email (Key for User Lookup)
-    organizer = _get_val(meeting_raw, ["organizer", "organizer_email", "owner"])
+    organizer = meeting.get("organizer", {})
     org_email = None
     if isinstance(organizer, dict):
         org_email = organizer.get("email") or organizer.get("address")
@@ -98,8 +122,8 @@ def process_outlook_webhook(data: dict) -> dict:
     # 2. Identify Salesperson (User)
     user = db.execute_query("SELECT phone, timezone FROM users WHERE email = ?", (org_email,), fetch_one=True)
     if not user:
-        logging.warning(f"Organizer {org_email} not registered. Registered users: {[r['email'] for r in db.execute_query('SELECT email FROM users', fetch_all=True)]}")
-        return {"status": "ignored", "message": f"Organizer {org_email} not registered"}, 200
+        logging.warning(f"Organizer {org_email} not registered. Ignoring.")
+        return {"status": "ignored", "message": "Organizer not registered"}, 200
 
     sp_phone = user['phone']
     sp_timezone = user['timezone']
@@ -107,34 +131,34 @@ def process_outlook_webhook(data: dict) -> dict:
     # 3. Save/Update Client
     client_id = None
     c_name = "Valued Client"
-    c_email = _get_val(client_raw, ["email", "address"]) if client_raw else None
+    c_email = client_data.get("email") if client_data else None
 
-    if client_raw and c_email:
+    if client_data and c_email:
         # Combine names
-        first = _get_val(client_raw, ["first_name", "firstName"])
-        last = _get_val(client_raw, ["last_name", "lastName"])
+        first = client_data.get('first_name')
+        last = client_data.get('last_name')
         if first or last:
             c_name = f"{first or ''} {last or ''}".strip()
         else:
-            c_name = _get_val(client_raw, ["name", "displayName"], "Valued Client")
+            c_name = client_data.get('name', 'Valued Client')
 
         # DB Logic
         c_exist = db.execute_query("SELECT id, hubspot_contact_id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
         if c_exist:
             client_id = c_exist['id']
-            db.execute_query("UPDATE clients SET name=?, company=? WHERE email=?", (c_name, _get_val(client_raw, ["company"]), c_email), commit=True)
+            db.execute_query("UPDATE clients SET name=?, company=? WHERE email=?", (c_name, client_data.get("company"), c_email), commit=True)
         else:
-            db.execute_query("INSERT INTO clients (email, name, company) VALUES (?, ?, ?)", (c_email, c_name, _get_val(client_raw, ["company"])), commit=True)
+            db.execute_query("INSERT INTO clients (email, name, company) VALUES (?, ?, ?)", (c_email, c_name, client_data.get("company")), commit=True)
             res = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
             client_id = res['id']
 
-    # 4. HubSpot Enrichment (PRIORITY)
+    # 4. HubSpot Enrichment
     hs_contact_id = None
     hs_context_str = ""
     if client_id and c_email:
         try:
             hubspot_service = __import__('services.hubspot_service', fromlist=['create_or_find_contact', 'get_contact_details'])
-            hs_contact_id = hubspot_service.create_or_find_contact(c_email, c_name, _get_val(client_raw, ["phone", "phoneNumber"], ""))
+            hs_contact_id = hubspot_service.create_or_find_contact(c_email, c_name, client_data.get("phone", ""))
             if hs_contact_id:
                 db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_contact_id, client_id), commit=True)
                 # Fetch deeper details for AI
@@ -147,13 +171,13 @@ def process_outlook_webhook(data: dict) -> dict:
             logging.error(f"HubSpot Enrichment Error: {e}")
 
     # 5. Prepare Coaching Plan
-    start_str = _get_val(meeting_raw, ["start_time", "startDateTime", "start"])
-    end_str = _get_val(meeting_raw, ["end_time", "endDateTime", "end"])
+    start_str = meeting.get("start_time")
+    end_str = meeting.get("end_time")
     start_dt = parse_iso_datetime(start_str) if start_str else get_current_utc_time()
     end_dt = parse_iso_datetime(end_str) if end_str else (start_dt + timedelta(minutes=30))
 
     # Parse Body
-    body_obj = _get_val(meeting_raw, ["body", "content", "description"])
+    body_obj = meeting.get("body")
     meeting_body = ""
     if isinstance(body_obj, dict):
         meeting_body = body_obj.get("content") or body_obj.get("Content") or ""
@@ -163,7 +187,7 @@ def process_outlook_webhook(data: dict) -> dict:
     # Enrichment
     meeting_body += hs_context_str
 
-    loc_obj = _get_val(meeting_raw, ["location", "place"])
+    loc_obj = meeting.get("location")
     location_str = loc_obj.get("display_name") if isinstance(loc_obj, dict) else str(loc_obj or "Unknown")
 
     # Display Time
@@ -171,12 +195,12 @@ def process_outlook_webhook(data: dict) -> dict:
     _local_end   = to_local_time(end_dt,   tz_str=sp_timezone)
     display_time = f"{_local_start.strftime('%b %d, %I:%M %p')} - {_local_end.strftime('%I:%M %p')} {_local_start.strftime('%Z')}"
 
-    mtg_title = _get_val(meeting_raw, ["title", "subject"], "Sales Meeting")
+    mtg_title = meeting.get("title") or meeting.get("subject") or "Upcoming Meeting"
 
     coaching = ai_service.generate_coaching_plan(
         meeting_title=mtg_title,
         client_name=c_name,
-        client_company=_get_val(client_raw, ["company"], "Their Company") if client_raw else "Their Company",
+        client_company=client_data.get("company", "Their Company") if client_data else "Their Company",
         start_time=display_time,
         meeting_body=meeting_body,
         location=location_str
@@ -201,16 +225,14 @@ def process_outlook_webhook(data: dict) -> dict:
     whatsapp_service.send_whatsapp_message(sp_phone, body=msg_body, use_template=True, template_vars=template_vars)
     logging.info(f"Coaching sent immediately to {sp_phone}")
 
-    # 7. Background / Slower Tasks (Safe to run after coaching)
+    # 7. Background / Slower Tasks
     # 7.1. Save Meeting
-    mtg_id = _get_val(meeting_raw, ["id", "meeting_id", "eventId", "outlook_id"])
+    mtg_id = meeting.get("meeting_id") or meeting.get("id")
     if not mtg_id:
-        logging.warning("No meeting ID found in payload. generating fallback ID.")
         import uuid
         mtg_id = f"gen_{str(uuid.uuid4())[:8]}"
-
-    # Check Attendees
-    atts = _get_val(meeting_raw, ["attendees"], [])
+    
+    atts = meeting.get("attendees", [])
     atts_str = ", ".join([str(a) for a in atts]) if isinstance(atts, list) else str(atts)
 
     existing_mtg = db.execute_query("SELECT id FROM meetings WHERE outlook_event_id = ?", (mtg_id,), fetch_one=True)
@@ -228,17 +250,13 @@ def process_outlook_webhook(data: dict) -> dict:
     except Exception as e:
         logging.error(f"HubSpot Sync Summary Error: {e}")
 
-    # 7.3. Aux API Scheduling
-    # 7.3.1. Get link (Direct or search)
-    meeting_link = _get_val(meeting_raw, ["online_meeting_url", "onlineMeetingUrl", "joinUrl", "join_url"])
-    
+    # 7.3. Aux API Scheduling (ROBUST VERSION)
+    meeting_link = meeting.get("online_meeting_url") or meeting.get("join_url")
     if not meeting_link:
-        # Search in location and body
+        # Search in location and body using the new robust helper
         meeting_link = _extract_meeting_link(f"{location_str} {meeting_body}")
         if meeting_link:
             logging.info(f"Detected meeting link from text: {meeting_link}")
-        else:
-            logging.warning(f"No meeting link found in location or body for {mtg_title}.")
 
     if meeting_link:
         try:
