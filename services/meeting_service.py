@@ -90,36 +90,42 @@ def process_outlook_webhook(data: dict) -> dict:
     Main entry point for processing webhook data from Make.com.
     Orchestrates: Parser -> DB -> AI -> WhatsApp -> Background Sync (Aux/Bot).
     """
-    logging.info(f"Processing Webhook | Payload Keys: {list(data.keys())}")
+    logging.info("=" * 60)
+    logging.info("[OUTLOOK WEBHOOK] Received new webhook")
+    logging.info(f"[OUTLOOK WEBHOOK] Payload Keys: {list(data.keys())}")
+    logging.info(f"[OUTLOOK WEBHOOK] Full Payload: {data}")
 
     # 1. Extract Meeting Data
     meeting_raw = _get_val(data, ["meeting", "Meeting Payload", "event", "payload"])
     if not meeting_raw:
-        logging.error(f"Webhook Error: Missing meeting data. Payload: {data}")
+        logging.error(f"[OUTLOOK WEBHOOK] ERROR: Missing meeting data. Payload: {data}")
         return {"status": "ignored", "message": "Missing meeting data"}, 200
 
-    logging.info(f"Meeting Data Found | Keys: {list(meeting_raw.keys()) if isinstance(meeting_raw, dict) else 'non-dict'}")
+    logging.info(f"[OUTLOOK WEBHOOK] Meeting Data Found | Keys: {list(meeting_raw.keys()) if isinstance(meeting_raw, dict) else 'non-dict'}")
+    logging.info(f"[OUTLOOK WEBHOOK] Meeting Raw Data: {meeting_raw}")
 
     # 2. Extract Organizer (Salesperson)
     organizer = _get_val(meeting_raw, ["organizer", "organizer_email", "owner", "organizer_address"])
     org_email = _extract_email(organizer)
     
+    logging.info(f"[OUTLOOK WEBHOOK] Raw Organizer Data: {organizer}")
+    
     if not org_email:
         # Fallback: check if it's a field directly in meeting_raw
         org_email = _get_val(meeting_raw, ["organizer_email", "organizerEmail"])
 
-    logging.info(f"Extracted Organizer Email: {org_email}")
+    logging.info(f"[OUTLOOK WEBHOOK] Extracted Organizer Email: {org_email}")
 
     # 3. Identify Salesperson (User)
     user = db.execute_query("SELECT phone, timezone FROM users WHERE email = ?", (org_email,), fetch_one=True)
     if not user:
-        # Try finding ANY registered user to not block (Temporary for debugging)
-        logging.warning(f"Organizer {org_email} not registered. Registered users: {[r['email'] for r in db.execute_query('SELECT email FROM users', fetch_all=True)]}")
+        registered_users = [r['email'] for r in db.execute_query('SELECT email FROM users', fetch_all=True)]
+        logging.warning(f"[OUTLOOK WEBHOOK] ERROR: Organizer {org_email} not registered. Registered users: {registered_users}")
         return {"status": "ignored", "message": f"Organizer {org_email} not registered"}, 200
 
     sp_phone = user['phone']
     sp_timezone = user['timezone']
-    logging.info(f"Found Salesperson: {org_email} -> {sp_phone} ({sp_timezone})")
+    logging.info(f"[OUTLOOK WEBHOOK] Found Salesperson: {org_email} -> Phone: {sp_phone}, Timezone: {sp_timezone}")
 
     # 4. Extract Client Data
     client_raw = _get_val(data, ["client", "Client", "participant", "contact"])
@@ -169,10 +175,15 @@ def process_outlook_webhook(data: dict) -> dict:
 
     # 6. Prepare Coaching Plan
     start_str = _get_val(meeting_raw, ["start_time", "startDateTime", "start"])
+    logging.info(f"[OUTLOOK WEBHOOK] Raw Start Time String: {start_str}")
+    
     start_dt = parse_iso_datetime(start_str) if start_str else get_current_utc_time()
+    logging.info(f"[OUTLOOK WEBHOOK] Parsed Start Time (UTC): {start_dt}")
     
     # Body parsing
     body_obj = _get_val(meeting_raw, ["body", "content", "description"])
+    logging.info(f"[OUTLOOK WEBHOOK] Raw Body Object: {body_obj}")
+    
     if isinstance(body_obj, dict):
         meeting_body = body_obj.get("content") or body_obj.get("Content") or ""
     else:
@@ -182,17 +193,19 @@ def process_outlook_webhook(data: dict) -> dict:
     
     loc_obj = _get_val(meeting_raw, ["location", "place"])
     location_str = loc_obj.get("display_name") if isinstance(loc_obj, dict) else str(loc_obj or "Online")
+    logging.info(f"[OUTLOOK WEBHOOK] Location: {location_str}")
 
     # Time display
     _local_start = to_local_time(start_dt, tz_str=sp_timezone)
     display_time = _local_start.strftime('%b %d, %I:%M %p %Z')
 
     mtg_title = _get_val(meeting_raw, ["title", "subject"], "Sales Meeting")
+    logging.info(f"[OUTLOOK WEBHOOK] Meeting Title: {mtg_title}")
 
     # SAFE AI GENERATION: Don't let 429 quota errors break the code
     coaching = None
     try:
-        logging.info(f"Generating coaching for {mtg_title} at {display_time}...")
+        logging.info(f"[OUTLOOK WEBHOOK] Generating AI coaching for '{mtg_title}'...")
         coaching = ai_service.generate_coaching_plan(
             meeting_title=mtg_title,
             client_name=c_name,
@@ -201,8 +214,9 @@ def process_outlook_webhook(data: dict) -> dict:
             meeting_body=meeting_body,
             location=location_str
         )
+        logging.info(f"[OUTLOOK WEBHOOK] AI Coaching generated successfully")
     except Exception as ai_err:
-        logging.error(f"AI Coaching Generation Failed (Likely Quota): {ai_err}")
+        logging.error(f"[OUTLOOK WEBHOOK] AI Coaching Generation Failed: {ai_err}")
         coaching = {
             "greeting": f"Hello! Ready for your meeting with {c_name}?",
             "scenario": "Upcoming Sales Call",
@@ -227,44 +241,79 @@ def process_outlook_webhook(data: dict) -> dict:
     }
     
     whatsapp_service.send_whatsapp_message(sp_phone, body=msg_body, use_template=True, template_vars=template_vars)
-    logging.info(f"Coaching sent to {sp_phone}")
+    logging.info(f"[OUTLOOK WEBHOOK] Coaching WhatsApp message sent to {sp_phone}")
 
     # 8. POST-COACHING TASKS (Save & Bot Join)
     mtg_id = _get_val(meeting_raw, ["meeting_id", "id", "eventId", "outlook_id"])
     if not mtg_id:
         import uuid
         mtg_id = f"gen_{str(uuid.uuid4())[:8]}"
+        logging.warning(f"[OUTLOOK WEBHOOK] No meeting ID found, generated fallback: {mtg_id}")
+    else:
+        logging.info(f"[OUTLOOK WEBHOOK] Meeting ID: {mtg_id}")
+
+    # Extract end time
+    end_str = _get_val(meeting_raw, ["end_time", "endDateTime", "end"])
+    logging.info(f"[OUTLOOK WEBHOOK] Raw End Time String: {end_str}")
+    
+    end_dt = parse_iso_datetime(end_str) if end_str else (start_dt + timedelta(minutes=30))
+    logging.info(f"[OUTLOOK WEBHOOK] Parsed End Time (UTC): {end_dt}")
 
     existing_mtg = db.execute_query("SELECT id FROM meetings WHERE outlook_event_id = ?", (mtg_id,), fetch_one=True)
+    logging.info(f"[OUTLOOK WEBHOOK] Existing meeting check: {existing_mtg}")
+    
     if not existing_mtg:
+        logging.info(f"[OUTLOOK WEBHOOK] Inserting new meeting to DB: outlook_id={mtg_id}, start={start_dt}, end={end_dt}, client={client_id}")
         db.execute_query(
-            "INSERT INTO meetings (outlook_event_id, start_time, client_id, status, salesperson_phone, location, title) VALUES (?, ?, ?, 'scheduled', ?, ?, ?)",
-            (mtg_id, start_dt, client_id, sp_phone, location_str, mtg_title),
+            "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, title) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?)",
+            (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, mtg_title),
             commit=True
         )
+        logging.info(f"[OUTLOOK WEBHOOK] Meeting saved to DB successfully")
+    else:
+        logging.info(f"[OUTLOOK WEBHOOK] Meeting already exists in DB, ID: {existing_mtg['id']}")
 
     # 9. Bot Join Scheduling
     meeting_link = _get_val(meeting_raw, ["online_meeting_url", "join_url", "onlineMeetingUrl"])
+    logging.info(f"[OUTLOOK WEBHOOK] Raw meeting link from online_meeting_url: {meeting_link}")
+    
     if not meeting_link:
-        meeting_link = _extract_meeting_link(f"{location_str} {meeting_body}")
+        search_text = f"{location_str} {meeting_body}"
+        logging.info(f"[OUTLOOK WEBHOOK] No direct link, searching in: {search_text[:200]}...")
+        meeting_link = _extract_meeting_link(search_text)
+        logging.info(f"[OUTLOOK WEBHOOK] Extracted meeting link from text: {meeting_link}")
 
     if meeting_link:
         try:
             import pytz
             start_dt_utc = start_dt.astimezone(pytz.utc) if start_dt.tzinfo else pytz.utc.localize(start_dt)
-            logging.info(f"Attempting to schedule bot join... Link: {meeting_link}")
-            aux_res = aux_service.schedule_meeting(meeting_link, start_dt_utc.strftime("%Y-%m-%dT%H:%M:%S+00:00"), mtg_title)
+            scheduled_time_str = start_dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            
+            logging.info("=" * 60)
+            logging.info(f"[BOT SCHEDULING] Attempting to schedule bot join")
+            logging.info(f"[BOT SCHEDULING] Meeting Link: {meeting_link}")
+            logging.info(f"[BOT SCHEDULING] Scheduled Time (UTC): {scheduled_time_str}")
+            logging.info(f"[BOT SCHEDULING] Title: {mtg_title}")
+            
+            aux_res = aux_service.schedule_meeting(meeting_link, scheduled_time_str, mtg_title)
+            
             if aux_res:
-                logging.info(f"Bot successfully scheduled! Aux ID: {aux_res.get('meetingId')}")
+                logging.info(f"[BOT SCHEDULING] SUCCESS! Aux ID: {aux_res.get('meetingId')}, Token: {aux_res.get('token')}")
                 db.execute_query("UPDATE meetings SET aux_meeting_id=?, aux_meeting_token=? WHERE outlook_event_id=?", 
                                (aux_res.get("meetingId"), aux_res.get("token"), mtg_id), commit=True)
+                logging.info(f"[BOT SCHEDULING] DB updated with aux_meeting_id and aux_meeting_token")
             else:
-                logging.error(f"Bot Join Scheduling returned failure for {mtg_title}")
+                logging.error(f"[BOT SCHEDULING] FAILED! aux_service.schedule_meeting returned None for '{mtg_title}'")
         except Exception as e:
-            logging.error(f"Bot Join Exception: {e}")
+            logging.error(f"[BOT SCHEDULING] EXCEPTION: {e}")
+            import traceback
+            logging.error(f"[BOT SCHEDULING] Traceback: {traceback.format_exc()}")
     else:
-        logging.warning(f"No meeting link found for {mtg_title}. Bot cannot join.")
+        logging.warning(f"[BOT SCHEDULING] SKIPPED - No meeting link found for '{mtg_title}'")
 
+    logging.info("=" * 60)
+    logging.info("[OUTLOOK WEBHOOK] Processing completed successfully")
+    logging.info("=" * 60)
     return {"status": "success"}
 
 
@@ -450,16 +499,28 @@ def process_aux_transcript(meeting_row, aux_data):
     """
     Processes transcript data specifically from the Aux API response.
     """
+    meeting_id = meeting_row.get('id', 'unknown')
+    logging.info("=" * 60)
+    logging.info(f"[AUX TRANSCRIPT] process_aux_transcript() called for meeting {meeting_id}")
+    logging.info(f"[AUX TRANSCRIPT] Aux data keys: {list(aux_data.keys()) if isinstance(aux_data, dict) else 'not a dict'}")
+    
     transcript_info = aux_data.get("transcript", {})
     content = transcript_info.get("content", "")
     title = aux_data.get("title", "Aux Meeting")
     
+    logging.info(f"[AUX TRANSCRIPT] Transcript title: {title}")
+    logging.info(f"[AUX TRANSCRIPT] Transcript content length: {len(content) if content else 0} chars")
+    
     if not content:
-        logging.warning(f"No transcript content for Aux meeting {meeting_row['id']}")
+        logging.warning(f"[AUX TRANSCRIPT] No transcript content for Aux meeting {meeting_id}")
         return False
-        
+    
+    logging.info(f"[AUX TRANSCRIPT] Calling process_transcript_data()...")
     res = process_transcript_data(meeting_row, content, title, source="aux_api")
-    return res.get("status") == "processed"
+    success = res.get("status") == "processed"
+    logging.info(f"[AUX TRANSCRIPT] Processing result: {success}, full response: {res}")
+    logging.info("=" * 60)
+    return success
 
 
 def process_transcript_data(meeting_row, transcript_content, title, source, transcript_url=None):
@@ -467,30 +528,52 @@ def process_transcript_data(meeting_row, transcript_content, title, source, tran
     Core logic to parse, store, analyze and notify regarding a transcript.
     """
     meeting_id = meeting_row['id']
-    logging.info(f"Processing transcript for meeting {meeting_id} from {source}")
+    logging.info("=" * 60)
+    logging.info(f"[TRANSCRIPT DATA] Processing transcript for meeting {meeting_id} from {source}")
+    logging.info(f"[TRANSCRIPT DATA] Meeting title: {title}")
+    logging.info(f"[TRANSCRIPT DATA] Content length: {len(transcript_content) if transcript_content else 0} chars")
+    logging.info(f"[TRANSCRIPT DATA] Transcript URL: {transcript_url}")
     
     # 1. Parse
+    logging.info(f"[TRANSCRIPT DATA] Step 1: Parsing transcript...")
     lines = transcript_service.parse_transcript(transcript_content)
+    logging.info(f"[TRANSCRIPT DATA] Parsed {len(lines)} lines")
+    if lines:
+        logging.info(f"[TRANSCRIPT DATA] First 3 lines: {lines[:3]}")
     
     # 2. Store
+    logging.info(f"[TRANSCRIPT DATA] Step 2: Storing transcript to DB...")
     transcript_service.store_transcript(meeting_id, lines, source=source)
-    logging.info(f"Stored {len(lines)} lines of transcript for meeting {meeting_id}")
+    logging.info(f"[TRANSCRIPT DATA] Stored {len(lines)} lines of transcript for meeting {meeting_id}")
     
     # 3. Analyze (SAFE AI CALL)
+    logging.info(f"[TRANSCRIPT DATA] Step 3: Generating AI analysis...")
     full_text = transcript_service.get_full_transcript_text(lines)
+    logging.info(f"[TRANSCRIPT DATA] Full text length for AI: {len(full_text)} chars")
+    
     analysis = None
     try:
         analysis = ai_service.generate_post_meeting_analysis(full_text)
+        logging.info(f"[TRANSCRIPT DATA] AI analysis generated successfully")
+        logging.info(f"[TRANSCRIPT DATA] Analysis keys: {list(analysis.keys()) if isinstance(analysis, dict) else 'not a dict'}")
     except Exception as e:
-        logging.error(f"Post-meeting AI analysis failed for meeting {meeting_id}: {e}")
+        logging.error(f"[TRANSCRIPT DATA] Post-meeting AI analysis failed for meeting {meeting_id}: {e}")
+        import traceback
+        logging.error(f"[TRANSCRIPT DATA] Traceback: {traceback.format_exc()}")
 
     # 4. Notify
     phone = meeting_row['salesperson_phone']
+    logging.info(f"[TRANSCRIPT DATA] Step 4: Notification - salesperson_phone: {phone}")
+    
     if phone and analysis:
         try:
             # Format Report
             objections = "\n".join([f"• \"{o['quote']}\"" for o in analysis.get('objections', [])]) or "None detected."
             next_steps = "\n".join([f"• {s}" for s in analysis.get('follow_up_actions', [])])
+            
+            logging.info(f"[TRANSCRIPT DATA] Buying signals: {len(analysis.get('buying_signals', []))}")
+            logging.info(f"[TRANSCRIPT DATA] Risks: {len(analysis.get('risks', []))}")
+            logging.info(f"[TRANSCRIPT DATA] Follow-up actions: {len(analysis.get('follow_up_actions', []))}")
             
             template_vars = {
                 "1": f"🧠 *Post-Meeting Analysis ({title})*",
@@ -508,18 +591,28 @@ def process_transcript_data(meeting_row, transcript_content, title, source, tran
                 f"👉 Reply *Done* after you have followed up."
             )
             
+            logging.info(f"[TRANSCRIPT DATA] Sending WhatsApp notification to {phone}")
             whatsapp_service.send_whatsapp_message(
                 phone,
                 body=msg_body,
                 use_template=True,
                 template_vars=template_vars
             )
+            logging.info(f"[TRANSCRIPT DATA] WhatsApp notification sent successfully")
         except Exception as notify_err:
-            logging.error(f"Failed to send post-meeting notification: {notify_err}")
+            logging.error(f"[TRANSCRIPT DATA] Failed to send post-meeting notification: {notify_err}")
+            import traceback
+            logging.error(f"[TRANSCRIPT DATA] Notification traceback: {traceback.format_exc()}")
+    else:
+        if not phone:
+            logging.warning(f"[TRANSCRIPT DATA] No salesperson_phone found, skipping notification")
+        if not analysis:
+            logging.warning(f"[TRANSCRIPT DATA] No AI analysis generated, skipping notification")
 
     # 5. Log to HubSpot (SAFE SYNC)
     if analysis:
         try:
+            logging.info(f"[TRANSCRIPT DATA] Step 5: Syncing to HubSpot...")
             hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis'])
             hubspot_service.sync_meeting_analysis(
                 client_db_id=meeting_row['client_id'],
@@ -527,7 +620,14 @@ def process_transcript_data(meeting_row, transcript_content, title, source, tran
                 analysis=analysis,
                 transcript_url=transcript_url or "Stored in Database"
             )
+            logging.info(f"[TRANSCRIPT DATA] HubSpot sync completed")
         except Exception as e:
-            logging.error(f"HubSpot Analysis Sync Failed: {e}")
-        
+            logging.error(f"[TRANSCRIPT DATA] HubSpot Analysis Sync Failed: {e}")
+            import traceback
+            logging.error(f"[TRANSCRIPT DATA] HubSpot traceback: {traceback.format_exc()}")
+    else:
+        logging.info(f"[TRANSCRIPT DATA] Skipping HubSpot sync (no analysis)")
+    
+    logging.info(f"[TRANSCRIPT DATA] Processing complete for meeting {meeting_id}")
+    logging.info("=" * 60)
     return {"status": "processed", "meeting_id": meeting_id}
