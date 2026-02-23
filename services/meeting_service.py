@@ -109,20 +109,24 @@ def process_outlook_webhook(data: dict) -> dict:
     else:
         logging.info(f"[OUTLOOK WEBHOOK] Meeting ID: {mtg_id}")
 
-    # Deduplication Check
-    existing_mtg = db.execute_query("SELECT id FROM meetings WHERE outlook_event_id = ?", (mtg_id,), fetch_one=True)
+    # Deduplication & Retry Logic
+    existing_mtg = db.execute_query("SELECT id, aux_meeting_token, status FROM meetings WHERE outlook_event_id = ?", (mtg_id,), fetch_one=True)
+    
+    is_retry = False
     if existing_mtg:
-        logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} already exists (ID: {existing_mtg['id']}). Skipping duplicate processing.")
-        return {"status": "success", "message": "Duplicate meeting skipped"}, 200
+        # If it has a bot token, it's fully registered in our system.
+        if existing_mtg['aux_meeting_token']:
+            logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} already exists with bot token. Skipping duplicate.")
+            return {"status": "success", "message": "Duplicate meeting skipped"}, 200
+        else:
+            logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} exists but missing bot token. Proceeding to fix/retry.")
+            is_retry = True
 
     # 2. Extract Organizer (Salesperson)
     organizer = _get_val(meeting_raw, ["organizer", "organizer_email", "owner", "organizer_address"])
     org_email = _extract_email(organizer)
     
-    logging.info(f"[OUTLOOK WEBHOOK] Raw Organizer Data: {organizer}")
-    
     if not org_email:
-        # Fallback: check if it's a field directly in meeting_raw
         org_email = _get_val(meeting_raw, ["organizer_email", "organizerEmail"])
 
     logging.info(f"[OUTLOOK WEBHOOK] Extracted Organizer Email: {org_email}")
@@ -131,31 +135,30 @@ def process_outlook_webhook(data: dict) -> dict:
     user = db.execute_query("SELECT phone, timezone FROM users WHERE email = ?", (org_email,), fetch_one=True)
     if not user:
         registered_users = [r['email'] for r in db.execute_query('SELECT email FROM users', fetch_all=True)]
-        logging.warning(f"[OUTLOOK WEBHOOK] ERROR: Organizer {org_email} not registered. Registered users: {registered_users}")
+        logging.warning(f"[OUTLOOK WEBHOOK] Organizer {org_email} not registered. Registered: {registered_users}")
         return {"status": "ignored", "message": f"Organizer {org_email} not registered"}, 200
 
     sp_phone = user['phone']
     sp_timezone = user['timezone']
-    logging.info(f"[OUTLOOK WEBHOOK] Found Salesperson: {org_email} -> Phone: {sp_phone}, Timezone: {sp_timezone}")
 
     # 4. Extract Client Data
     client_raw = _get_val(data, ["client", "Client", "participant", "contact"])
     c_email = _extract_email(client_raw)
     
     if not c_email:
-        # Look in attendees
         attendees = _get_val(meeting_raw, ["attendees"], [])
-        if isinstance(attendees, list) and len(attendees) > 0:
-            # Pick first attendee that isn't the organizer
+        if isinstance(attendees, list):
             for att in attendees:
                 ae = _extract_email(att)
                 if ae and ae != org_email:
                     c_email = ae
-                    logging.info(f"Found client email in attendees: {c_email}")
                     break
 
     c_name = _get_val(client_raw, ["name", "displayName", "fullName", "first_name"], "Valued Client")
-    logging.info(f"Client Identified: {c_name} <{c_email}>")
+    c_phone = _get_val(client_raw, ["phone", "phoneNumber", "mobilePhone"])
+    c_company = _get_val(client_raw, ["company", "companyName", "organization"])
+    
+    logging.info(f"[OUTLOOK WEBHOOK] Client: {c_name} <{c_email}> | Phone: {c_phone} | Company: {c_company}")
 
     # 5. DB & HubSpot Sync (Pre-Coaching)
     client_id = None
@@ -163,9 +166,9 @@ def process_outlook_webhook(data: dict) -> dict:
         c_exist = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
         if c_exist:
             client_id = c_exist['id']
-            db.execute_query("UPDATE clients SET name=? WHERE email=?", (c_name, c_email), commit=True)
+            db.execute_query("UPDATE clients SET name=?, phone=?, company=? WHERE email=?", (c_name, c_phone, c_company, c_email), commit=True)
         else:
-            db.execute_query("INSERT INTO clients (email, name) VALUES (?, ?)", (c_email, c_name), commit=True)
+            db.execute_query("INSERT INTO clients (email, name, phone, company) VALUES (?, ?, ?, ?)", (c_email, c_name, c_phone, c_company), commit=True)
             res = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
             client_id = res['id']
 
@@ -173,7 +176,8 @@ def process_outlook_webhook(data: dict) -> dict:
     if client_id and c_email:
         try:
             hubspot_service = __import__('services.hubspot_service', fromlist=['create_or_find_contact', 'get_contact_details'])
-            hs_contact_id = hubspot_service.create_or_find_contact(c_email, c_name, _get_val(client_raw, ["phone", "phoneNumber"], ""))
+            # Pass mobile phone to HubSpot as well
+            hs_contact_id = hubspot_service.create_or_find_contact(c_email, c_name, c_phone or "")
             if hs_contact_id:
                 db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_contact_id, client_id), commit=True)
                 hs_details = hubspot_service.get_contact_details(hs_contact_id)
@@ -186,10 +190,7 @@ def process_outlook_webhook(data: dict) -> dict:
 
     # 6. Prepare Coaching Plan
     start_str = _get_val(meeting_raw, ["start_time", "startDateTime", "start"])
-    logging.info(f"[OUTLOOK WEBHOOK] Raw Start Time String: {start_str}")
-    
     start_dt = parse_iso_datetime(start_str) if start_str else get_current_utc_time()
-    logging.info(f"[OUTLOOK WEBHOOK] Parsed Start Time (UTC): {start_dt}")
     
     # Body parsing - handle stringified JSON and HTML
     body_raw = _get_val(meeting_raw, ["body", "content", "description"])
@@ -222,133 +223,103 @@ def process_outlook_webhook(data: dict) -> dict:
         for att in atts_raw:
             email = _extract_email(att)
             name = _get_val(att, ["name", "displayName", "emailAddress.name"]) if isinstance(att, dict) else None
-            if email:
-                attendee_list.append(f"{name or 'Guest'} <{email}>")
+            if email: attendee_list.append(f"{name or 'Guest'} <{email}>")
     
-    logging.info(f"[OUTLOOK WEBHOOK] Extracted {len(attendee_list)} attendees: {attendee_list}")
-    
-    # Enrich body with attendee info for the AI
     if attendee_list:
         meeting_body += "\n\n[Attendees Participating]\n" + "\n".join(attendee_list)
     
-    # Log a snippet of the cleaned body instead of the whole thing
-    logging.info(f"[OUTLOOK WEBHOOK] Cleaned Meeting Body Snippet: {meeting_body[:150]}...")
-
+    logging.info(f"[OUTLOOK WEBHOOK] Extracted {len(attendee_list)} attendees. Body snippet: {meeting_body[:100]}...")
+    
     loc_obj = _get_val(meeting_raw, ["location", "place"])
     location_str = loc_obj.get("display_name") if isinstance(loc_obj, dict) else str(loc_obj or "Online")
-    logging.info(f"[OUTLOOK WEBHOOK] Location: {location_str}")
 
     # Time display
     _local_start = to_local_time(start_dt, tz_str=sp_timezone)
     display_time = _local_start.strftime('%b %d, %I:%M %p %Z')
-
     mtg_title = _get_val(meeting_raw, ["title", "subject"], "Sales Meeting")
-    logging.info(f"[OUTLOOK WEBHOOK] Meeting Title: {mtg_title}")
-
-    # SAFE AI GENERATION: Don't let 429 quota errors break the code
-    coaching = None
-    try:
-        logging.info(f"[OUTLOOK WEBHOOK] Generating AI coaching for '{mtg_title}'...")
-        coaching = ai_service.generate_coaching_plan(
-            meeting_title=mtg_title,
-            client_name=c_name,
-            client_company=_get_val(client_raw, ["company"], "Prospect"),
-            start_time=display_time,
-            meeting_body=meeting_body,
-            location=location_str
-        )
-        logging.info(f"[OUTLOOK WEBHOOK] AI Coaching generated successfully")
-    except Exception as ai_err:
-        logging.error(f"[OUTLOOK WEBHOOK] AI Coaching Generation Failed: {ai_err}")
-        coaching = {
-            "greeting": f"Hello! Ready for your meeting with {c_name}?",
-            "scenario": "Upcoming Sales Call",
-            "steps": ["Review recent notes", "Confirm meeting link", "Set clear objectives"],
-            "recommended_reply": "Looking forward to our chat!"
-        }
 
     # 7. SEND COACHING (Priority)
-    msg_body = (
-        f"🚀 *New Meeting: {mtg_title}*\n"
-        f"{coaching.get('greeting')}\n\n"
-        f"🎯 *Scenario*: {coaching.get('scenario')}\n\n"
-        f"📋 *Prep Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", [])) + "\n\n"
-        f"💡 *Reply*: {coaching.get('recommended_reply')}"
-    )
-    
-    template_vars = {
-        "1": f"🚀 *{mtg_title}*",
-        "2": f"{coaching.get('greeting')}\n\n🎯 {coaching.get('scenario')}",
-        "3": f"📋 *Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", []))[:200],
-        "4": f"💡 {coaching.get('recommended_reply')}"
-    }
-    
-    whatsapp_service.send_whatsapp_message(sp_phone, body=msg_body, use_template=True, template_vars=template_vars)
-    logging.info(f"[OUTLOOK WEBHOOK] Coaching WhatsApp message sent to {sp_phone}")
+    # If it's a retry and we already sent the coaching (status exists), we might want to skip sending again
+    # or just send it again if the user didn't get it. For now, let's skip re-sending if it was already 'scheduled'
+    if is_retry and existing_mtg.get('status') == 'scheduled':
+        logging.info(f"[OUTLOOK WEBHOOK] Skipping WhatsApp coaching for retry - already marked as scheduled.")
+    else:
+        try:
+            logging.info(f"[OUTLOOK WEBHOOK] Generating AI coaching for '{mtg_title}'...")
+            coaching = ai_service.generate_coaching_plan(
+                meeting_title=mtg_title,
+                client_name=c_name,
+                client_company=c_company or "Prospect",
+                start_time=display_time,
+                meeting_body=meeting_body,
+                location=location_str
+            )
+            
+            msg_body = (
+                f"🚀 *New Meeting: {mtg_title}*\n"
+                f"{coaching.get('greeting')}\n\n"
+                f"🎯 *Scenario*: {coaching.get('scenario')}\n\n"
+                f"📋 *Prep Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", [])) + "\n\n"
+                f"💡 *Reply*: {coaching.get('recommended_reply')}"
+            )
+            
+            template_vars = {
+                "1": f"🚀 *{mtg_title}*",
+                "2": f"{coaching.get('greeting')}\n\n🎯 {coaching.get('scenario')}",
+                "3": f"📋 *Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", []))[:200],
+                "4": f"💡 {coaching.get('recommended_reply')}"
+            }
+            
+            whatsapp_service.send_whatsapp_message(sp_phone, body=msg_body, use_template=True, template_vars=template_vars)
+            logging.info(f"[OUTLOOK WEBHOOK] Coaching WhatsApp message sent to {sp_phone}")
+        except Exception as e:
+            logging.error(f"[OUTLOOK WEBHOOK] AI Coaching/WhatsApp failed: {e}")
 
     # 8. POST-COACHING TASKS (Save & Bot Join)
-    # mtg_id is already extracted at step 1.5
-
-    # Extract end time
     end_str = _get_val(meeting_raw, ["end_time", "endDateTime", "end"])
-    logging.info(f"[OUTLOOK WEBHOOK] Raw End Time String: {end_str}")
-    
     end_dt = parse_iso_datetime(end_str) if end_str else (start_dt + timedelta(minutes=30))
-    logging.info(f"[OUTLOOK WEBHOOK] Parsed End Time (UTC): {end_dt}")
 
-    # No need for existing_mtg check here anymore as it was handled early
-    logging.info(f"[OUTLOOK WEBHOOK] Inserting new meeting to DB: outlook_id={mtg_id}, start={start_dt}, end={end_dt}, client={client_id}")
-    db.execute_query(
-        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, title) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?)",
-        (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, mtg_title),
-        commit=True
-    )
-    logging.info(f"[OUTLOOK WEBHOOK] Meeting saved to DB successfully")
+    if is_retry:
+        logging.info(f"[OUTLOOK WEBHOOK] Updating existing meeting Record ID: {existing_mtg['id']}")
+        db.execute_query(
+            "UPDATE meetings SET start_time=?, end_time=?, client_id=?, location=?, title=? WHERE outlook_event_id=?",
+            (start_dt, end_dt, client_id, location_str, mtg_title, mtg_id), commit=True
+        )
+    else:
+        logging.info(f"[OUTLOOK WEBHOOK] Inserting new meeting: {mtg_id}")
+        db.execute_query(
+            "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, title) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?)",
+            (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, mtg_title), commit=True
+        )
 
     # 9. Bot Join Scheduling
     meeting_link = _get_val(meeting_raw, ["online_meeting_url", "join_url", "onlineMeetingUrl"])
-    logging.info(f"[OUTLOOK WEBHOOK] Raw meeting link from online_meeting_url: {meeting_link}")
-    
     if not meeting_link:
-        search_text = f"{location_str} {meeting_body}"
-        logging.info(f"[OUTLOOK WEBHOOK] No direct link, searching in: {search_text[:200]}...")
-        meeting_link = _extract_meeting_link(search_text)
-        logging.info(f"[OUTLOOK WEBHOOK] Extracted meeting link from text: {meeting_link}")
+        meeting_link = _extract_meeting_link(f"{location_str} {meeting_body}")
 
     if meeting_link:
         try:
             import pytz
             start_dt_utc = start_dt.astimezone(pytz.utc) if start_dt.tzinfo else pytz.utc.localize(start_dt)
-            # Match the exact format shown in successful response logs: 2026-02-23T15:24:00.000Z
             scheduled_time_str = start_dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             
-            logging.info("=" * 60)
-            logging.info(f"[BOT SCHEDULING] Preparing to schedule bot join")
-            logging.info(f"[BOT SCHEDULING] Extracted Meeting Link: {meeting_link}")
-            logging.info(f"[BOT SCHEDULING] Scheduled Time (UTC): {scheduled_time_str}")
-            logging.info(f"[BOT SCHEDULING] Title: {mtg_title}")
-            
+            logging.info(f"[BOT SCHEDULING] Attempting bot join for '{mtg_title}' at {scheduled_time_str}")
             aux_res = aux_service.schedule_meeting(meeting_link, scheduled_time_str, mtg_title, attendee_name="Rolplay (AI Coach)")
             
             if aux_res:
-                logging.info(f"[BOT SCHEDULING] SUCCESS! Aux ID: {aux_res.get('meetingId')}, Token: {aux_res.get('token')}")
                 db.execute_query("UPDATE meetings SET aux_meeting_id=?, aux_meeting_token=? WHERE outlook_event_id=?", 
                                (aux_res.get("meetingId"), aux_res.get("token"), mtg_id), commit=True)
-                logging.info(f"[BOT SCHEDULING] DB updated with aux_meeting_id and aux_meeting_token")
+                logging.info(f"[BOT SCHEDULING] SUCCESS for {mtg_id}")
             else:
-                logging.error(f"[BOT SCHEDULING] FAILED! aux_service.schedule_meeting returned None for '{mtg_title}'")
+                logging.error(f"[BOT SCHEDULING] FAILED for {mtg_id}")
         except Exception as e:
             logging.error(f"[BOT SCHEDULING] EXCEPTION: {e}")
-            import traceback
-            logging.error(f"[BOT SCHEDULING] Traceback: {traceback.format_exc()}")
     else:
-        logging.warning(f"[BOT SCHEDULING] SKIPPED - No meeting link found for '{mtg_title}'")
+        logging.warning(f"[BOT SCHEDULING] SKIPPED - No link for {mtg_id}")
 
-    logging.info("=" * 60)
     logging.info("[OUTLOOK WEBHOOK] Processing completed successfully")
     logging.info("=" * 60)
     return {"status": "success"}
-
 
 def process_read_ai_webhook(data: dict):
     """Processes incoming webhook from Read AI."""
