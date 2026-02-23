@@ -11,17 +11,21 @@ def schedule_meeting(meeting_link, scheduled_time, title, attendee_name="Rolplay
     Returns the meetingToken and meetingId on success.
     """
     url = f"{AUX_BASE_URL}/meetings/schedule"
+    
+    # Use both formats for robustness as different providers might expect different casing
     payload = {
         "meetingLink": meeting_link,
-        "scheduled_time": scheduled_time, # Expected ISO format
+        "scheduled_time": scheduled_time, 
+        "scheduledTime": scheduled_time,
         "title": title,
-        "attendee_name": attendee_name
+        "attendee_name": attendee_name,
+        "attendeeName": attendee_name
     }
     
     logging.info("=" * 60)
     logging.info(f"[AUX API] schedule_meeting() called")
     logging.info(f"[AUX API] URL: {url}")
-    logging.info(f"[AUX API] Payload: {payload}")
+    logging.info(f"[AUX API] Final Payload for Scheduling: {json.dumps(payload)}")
     
     try:
         logging.info(f"[AUX API] Sending POST request...")

@@ -288,11 +288,12 @@ def process_outlook_webhook(data: dict) -> dict:
         try:
             import pytz
             start_dt_utc = start_dt.astimezone(pytz.utc) if start_dt.tzinfo else pytz.utc.localize(start_dt)
-            scheduled_time_str = start_dt_utc.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            # Match the exact format shown in successful response logs: 2026-02-23T15:24:00.000Z
+            scheduled_time_str = start_dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             
             logging.info("=" * 60)
-            logging.info(f"[BOT SCHEDULING] Attempting to schedule bot join")
-            logging.info(f"[BOT SCHEDULING] Meeting Link: {meeting_link}")
+            logging.info(f"[BOT SCHEDULING] Preparing to schedule bot join")
+            logging.info(f"[BOT SCHEDULING] Extracted Meeting Link: {meeting_link}")
             logging.info(f"[BOT SCHEDULING] Scheduled Time (UTC): {scheduled_time_str}")
             logging.info(f"[BOT SCHEDULING] Title: {mtg_title}")
             
