@@ -328,8 +328,8 @@ def process_outlook_webhook(data: dict) -> dict:
             aux_res = aux_service.schedule_meeting(meeting_link, scheduled_time_utc, mtg_title, attendee_name="Rolplay (AI Coach)")
             
             if aux_res:
-                db.execute_query("UPDATE meetings SET aux_meeting_id=?, aux_meeting_token=? WHERE outlook_event_id=?", 
-                               (aux_res.get("meetingId"), aux_res.get("token"), mtg_id), commit=True)
+                db.execute_query("UPDATE meetings SET aux_meeting_id=?, aux_meeting_token=?, location=? WHERE outlook_event_id=?", 
+                               (aux_res.get("meetingId"), aux_res.get("token"), meeting_link, mtg_id), commit=True)
                 logging.info(f"[BOT SCHEDULING] SUCCESS for {mtg_id}")
             else:
                 logging.error(f"[BOT SCHEDULING] FAILED for {mtg_id}")
