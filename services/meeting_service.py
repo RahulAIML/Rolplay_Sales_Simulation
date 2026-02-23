@@ -93,12 +93,11 @@ def process_outlook_webhook(data: dict) -> dict:
     logging.info("=" * 60)
     logging.info("[OUTLOOK WEBHOOK] Received new webhook")
     logging.info(f"[OUTLOOK WEBHOOK] Payload Keys: {list(data.keys())}")
-    logging.info(f"[OUTLOOK WEBHOOK] Full Payload: {data}")
 
     # 1. Extract Meeting Data
     meeting_raw = _get_val(data, ["meeting", "Meeting Payload", "event", "payload"])
     if not meeting_raw:
-        logging.error(f"[OUTLOOK WEBHOOK] ERROR: Missing meeting data. Payload: {data}")
+        logging.error("[OUTLOOK WEBHOOK] ERROR: Missing meeting data")
         return {"status": "ignored", "message": "Missing meeting data"}, 200
 
     # 1.5 Extract Meeting ID early for deduplication
@@ -192,17 +191,49 @@ def process_outlook_webhook(data: dict) -> dict:
     start_dt = parse_iso_datetime(start_str) if start_str else get_current_utc_time()
     logging.info(f"[OUTLOOK WEBHOOK] Parsed Start Time (UTC): {start_dt}")
     
-    # Body parsing
-    body_obj = _get_val(meeting_raw, ["body", "content", "description"])
-    logging.info(f"[OUTLOOK WEBHOOK] Raw Body Object: {body_obj}")
+    # Body parsing - handle stringified JSON and HTML
+    body_raw = _get_val(meeting_raw, ["body", "content", "description"])
+    meeting_body = ""
     
-    if isinstance(body_obj, dict):
-        meeting_body = body_obj.get("content") or body_obj.get("Content") or ""
+    if isinstance(body_raw, str) and body_raw.strip().startswith('{'):
+        try:
+            import json
+            body_json = json.loads(body_raw)
+            body_raw = body_json.get("content") or body_json.get("Content") or body_raw
+        except: pass
+
+    if isinstance(body_raw, dict):
+        meeting_body = body_raw.get("content") or body_raw.get("Content") or ""
     else:
-        meeting_body = str(body_obj or "")
+        meeting_body = str(body_raw or "")
+    
+    # Strip HTML tags for AI
+    if "<" in meeting_body and ">" in meeting_body:
+        import re
+        meeting_body = re.sub(r'<[^>]*>', ' ', meeting_body)
+        meeting_body = re.sub(r'\s+', ' ', meeting_body).strip()
     
     meeting_body += hs_context_str
     
+    # Extract Attendees for AI
+    atts_raw = _get_val(meeting_raw, ["attendees"], [])
+    attendee_list = []
+    if isinstance(atts_raw, list):
+        for att in atts_raw:
+            email = _extract_email(att)
+            name = _get_val(att, ["name", "displayName", "emailAddress.name"]) if isinstance(att, dict) else None
+            if email:
+                attendee_list.append(f"{name or 'Guest'} <{email}>")
+    
+    logging.info(f"[OUTLOOK WEBHOOK] Extracted {len(attendee_list)} attendees: {attendee_list}")
+    
+    # Enrich body with attendee info for the AI
+    if attendee_list:
+        meeting_body += "\n\n[Attendees Participating]\n" + "\n".join(attendee_list)
+    
+    # Log a snippet of the cleaned body instead of the whole thing
+    logging.info(f"[OUTLOOK WEBHOOK] Cleaned Meeting Body Snippet: {meeting_body[:150]}...")
+
     loc_obj = _get_val(meeting_raw, ["location", "place"])
     location_str = loc_obj.get("display_name") if isinstance(loc_obj, dict) else str(loc_obj or "Online")
     logging.info(f"[OUTLOOK WEBHOOK] Location: {location_str}")
