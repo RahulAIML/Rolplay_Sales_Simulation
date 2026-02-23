@@ -313,11 +313,11 @@ def process_outlook_webhook(data: dict) -> dict:
 
     if meeting_link:
         try:
-            import pytz
-            start_dt_utc = start_dt.astimezone(pytz.utc) if start_dt.tzinfo else pytz.utc.localize(start_dt)
-            scheduled_time_str = start_dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            # NEW: Local time for automatic timezone selection on Aux side
+            start_dt_local = to_local_time(start_dt, tz_str=sp_timezone)
+            scheduled_time_str = start_dt_local.strftime("%Y-%m-%dT%H:%M:%S")
             
-            logging.info(f"[BOT SCHEDULING] Attempting bot join for '{mtg_title}' at {scheduled_time_str}")
+            logging.info(f"[BOT SCHEDULING] Attempting bot join for '{mtg_title}' at {scheduled_time_str} (Local: {sp_timezone})")
             aux_res = aux_service.schedule_meeting(meeting_link, scheduled_time_str, mtg_title, attendee_name="Rolplay (AI Coach)")
             
             if aux_res:
