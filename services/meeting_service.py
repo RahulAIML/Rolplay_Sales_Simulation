@@ -98,7 +98,7 @@ def process_outlook_webhook(data: dict) -> dict:
     meeting_raw = _get_val(data, ["meeting", "Meeting Payload", "event", "payload"])
     if not meeting_raw:
         logging.error("[OUTLOOK WEBHOOK] ERROR: Missing meeting data")
-        return {"status": "ignored", "message": "Missing meeting data"}, 200
+        return {"status": "ignored", "message": "Missing meeting data"}
 
     # 1.5 Extract Meeting ID early for deduplication
     mtg_id = _get_val(meeting_raw, ["meeting_id", "id", "eventId", "outlook_id"])
@@ -117,7 +117,7 @@ def process_outlook_webhook(data: dict) -> dict:
         # If it has a bot token, it's fully registered in our system.
         if existing_mtg['aux_meeting_token']:
             logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} already exists with bot token. Skipping duplicate.")
-            return {"status": "success", "message": "Duplicate meeting skipped"}, 200
+            return {"status": "success", "message": "Duplicate meeting skipped"}
         else:
             logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} exists but missing bot token. Proceeding to fix/retry.")
             is_retry = True
@@ -136,7 +136,7 @@ def process_outlook_webhook(data: dict) -> dict:
     if not user:
         registered_users = [r['email'] for r in db.execute_query('SELECT email FROM users', fetch_all=True)]
         logging.warning(f"[OUTLOOK WEBHOOK] Organizer {org_email} not registered. Registered: {registered_users}")
-        return {"status": "ignored", "message": f"Organizer {org_email} not registered"}, 200
+        return {"status": "ignored", "message": f"Organizer {org_email} not registered"}
 
     sp_phone = user['phone']
     sp_timezone = user['timezone']
@@ -318,12 +318,11 @@ def process_outlook_webhook(data: dict) -> dict:
 
     if meeting_link:
         try:
-            # NEW: Local time for automatic timezone selection on Aux side
-            start_dt_local = to_local_time(start_dt, tz_str=sp_timezone)
-            scheduled_time_str = start_dt_local.strftime("%Y-%m-%dT%H:%M:%S")
+            # Standardize on UTC for AUX API to avoid offset confusion
+            scheduled_time_utc = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            logging.info(f"[BOT SCHEDULING] Attempting bot join for '{mtg_title}' at {scheduled_time_str} (Local: {sp_timezone})")
-            aux_res = aux_service.schedule_meeting(meeting_link, scheduled_time_str, mtg_title, attendee_name="Rolplay (AI Coach)")
+            logging.info(f"[BOT SCHEDULING] Attempting bot join for '{mtg_title}' at {scheduled_time_utc} (UTC)")
+            aux_res = aux_service.schedule_meeting(meeting_link, scheduled_time_utc, mtg_title, attendee_name="Rolplay (AI Coach)")
             
             if aux_res:
                 db.execute_query("UPDATE meetings SET aux_meeting_id=?, aux_meeting_token=? WHERE outlook_event_id=?", 

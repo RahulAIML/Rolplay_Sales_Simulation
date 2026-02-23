@@ -59,7 +59,12 @@ def generate_coaching_plan(meeting_title: str, client_name: str, client_company:
             
         return json.loads(text)
     except Exception as e:
-        logging.error(f"Gemini JSON Gen Error: {e}")
+        err_msg = str(e)
+        if "429" in err_msg or "quota" in err_msg.lower():
+            logging.warning(f"Gemini Rate Limit (429) hit: {err_msg}")
+        else:
+            logging.error(f"Gemini JSON Gen Error: {e}")
+            
         # Return fallback structure
         return {
             "greeting": "Hello!",
