@@ -110,7 +110,7 @@ def check_pending_meetings():
     
     # We poll meetings with a token and status 'scheduled' or 'reminder_sent'
     aux_meetings = db.execute_query(
-        "SELECT * FROM meetings WHERE aux_meeting_token IS NOT NULL AND status IN ('scheduled', 'reminder_sent')", 
+        "SELECT * FROM meetings WHERE aux_meeting_token IS NOT NULL AND status IN ('scheduled', 'reminder_sent', 'pending') ORDER BY id DESC LIMIT 2", 
         fetch_all=True
     ) or []
     

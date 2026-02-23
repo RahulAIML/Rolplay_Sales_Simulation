@@ -114,13 +114,15 @@ def process_outlook_webhook(data: dict) -> dict:
     
     is_retry = False
     if existing_mtg:
-        # If it has a bot token, it's fully registered in our system.
-        if existing_mtg['aux_meeting_token']:
-            logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} already exists with bot token. Skipping duplicate.")
-            return {"status": "success", "message": "Duplicate meeting skipped"}
-        else:
-            logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} exists but missing bot token. Proceeding to fix/retry.")
-            is_retry = True
+        # If it's already completed, we really don't want to re-process everything
+        if existing_mtg['status'] == 'completed':
+            logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} is already COMPLETED. Skipping.")
+            return {"status": "success", "message": "Already completed"}
+            
+        # If it has a bot token but not completed, we might want to re-schedule/retry
+        # This allows the user to re-invite the bot if it failed to join first time
+        logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} exists (Status: {existing_mtg['status']}). Allowing re-trigger/update.")
+        is_retry = True
 
     # 2. Extract Organizer (Salesperson)
     organizer = _get_val(meeting_raw, ["organizer", "organizer_email", "owner", "organizer_address"])
@@ -317,6 +319,7 @@ def process_outlook_webhook(data: dict) -> dict:
         meeting_link = _extract_meeting_link(f"{location_str} {meeting_body}")
 
     if meeting_link:
+        logging.info(f"[BOT SCHEDULING] Meeting Link found: {meeting_link}")
         try:
             # Standardize on UTC for AUX API to avoid offset confusion
             scheduled_time_utc = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
