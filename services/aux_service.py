@@ -16,6 +16,7 @@ def schedule_meeting(meeting_link, scheduled_time, title, attendee_name="Rolplay
     
     payload = {
         "meetingLink": meeting_link,
+        "meeting_link": meeting_link,
         "scheduled_time": scheduled_time, 
         "scheduledTime": scheduled_time,
         "title": title,
