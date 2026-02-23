@@ -104,20 +104,40 @@ def check_pending_meetings():
     
     # 2. POLL AUX API FOR TRANSCRIPTS
     # Find meetings that have an Aux token but aren't fully processed yet.
-    # We'll check 'reminder_sent' meetings that have an aux_token.
+    # Optimization: Only poll meetings that are 'active' (e.g., within 24 hours of start time)
     logging.info("=" * 60)
     logging.info("[SCHEDULER] Starting AUX API transcript polling...")
     
+    # We poll meetings with a token and status 'scheduled' or 'reminder_sent'
     aux_meetings = db.execute_query(
         "SELECT * FROM meetings WHERE aux_meeting_token IS NOT NULL AND status IN ('scheduled', 'reminder_sent')", 
         fetch_all=True
     ) or []
     
-    logging.info(f"[SCHEDULER] Found {len(aux_meetings)} meetings with aux_meeting_token ready for polling")
+    logging.info(f"[SCHEDULER] Found {len(aux_meetings)} total meetings with aux_meeting_token ready for polling")
     
     for am in aux_meetings:
         meeting_id = am['id']
         token = am['aux_meeting_token']
+        start_time_str = am.get('start_time')
+        
+        # Deduplication/Efficiency: Skip polling if meeting is too old (e.g. > 24 hours) or too far in future
+        if start_time_str:
+            try:
+                start_dt = parse_iso_datetime(start_time_str)
+                # If meeting started > 24 hours ago and still not completed, mark as failed/skipped to stop polling
+                if now_utc > (start_dt + timedelta(hours=24)):
+                    logging.warning(f"[SCHEDULER] Meeting {meeting_id} is > 24h old and still pending. Marking as 'failed' to stop polling.")
+                    db.execute_query("UPDATE meetings SET status = 'failed' WHERE id = ?", (meeting_id,), commit=True)
+                    continue
+                
+                # If meeting is > 1 hour in the future, don't poll yet (optional optimization)
+                if now_utc < (start_dt - timedelta(hours=1)):
+                    # logging.info(f"[SCHEDULER] Meeting {meeting_id} is too far in the future, skipping poll.")
+                    continue
+            except Exception as e:
+                logging.error(f"[SCHEDULER] Error parsing start_time for meeting {meeting_id}: {e}")
+
         try:
             logging.info(f"[SCHEDULER] Polling AUX status for meeting {meeting_id}, token: {token[:20]}...")
             

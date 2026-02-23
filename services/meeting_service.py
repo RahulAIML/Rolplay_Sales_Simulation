@@ -101,8 +101,20 @@ def process_outlook_webhook(data: dict) -> dict:
         logging.error(f"[OUTLOOK WEBHOOK] ERROR: Missing meeting data. Payload: {data}")
         return {"status": "ignored", "message": "Missing meeting data"}, 200
 
-    logging.info(f"[OUTLOOK WEBHOOK] Meeting Data Found | Keys: {list(meeting_raw.keys()) if isinstance(meeting_raw, dict) else 'non-dict'}")
-    logging.info(f"[OUTLOOK WEBHOOK] Meeting Raw Data: {meeting_raw}")
+    # 1.5 Extract Meeting ID early for deduplication
+    mtg_id = _get_val(meeting_raw, ["meeting_id", "id", "eventId", "outlook_id"])
+    if not mtg_id:
+        import uuid
+        mtg_id = f"gen_{str(uuid.uuid4())[:8]}"
+        logging.warning(f"[OUTLOOK WEBHOOK] No meeting ID found, generated fallback: {mtg_id}")
+    else:
+        logging.info(f"[OUTLOOK WEBHOOK] Meeting ID: {mtg_id}")
+
+    # Deduplication Check
+    existing_mtg = db.execute_query("SELECT id FROM meetings WHERE outlook_event_id = ?", (mtg_id,), fetch_one=True)
+    if existing_mtg:
+        logging.info(f"[OUTLOOK WEBHOOK] Meeting {mtg_id} already exists (ID: {existing_mtg['id']}). Skipping duplicate processing.")
+        return {"status": "success", "message": "Duplicate meeting skipped"}, 200
 
     # 2. Extract Organizer (Salesperson)
     organizer = _get_val(meeting_raw, ["organizer", "organizer_email", "owner", "organizer_address"])
@@ -244,13 +256,7 @@ def process_outlook_webhook(data: dict) -> dict:
     logging.info(f"[OUTLOOK WEBHOOK] Coaching WhatsApp message sent to {sp_phone}")
 
     # 8. POST-COACHING TASKS (Save & Bot Join)
-    mtg_id = _get_val(meeting_raw, ["meeting_id", "id", "eventId", "outlook_id"])
-    if not mtg_id:
-        import uuid
-        mtg_id = f"gen_{str(uuid.uuid4())[:8]}"
-        logging.warning(f"[OUTLOOK WEBHOOK] No meeting ID found, generated fallback: {mtg_id}")
-    else:
-        logging.info(f"[OUTLOOK WEBHOOK] Meeting ID: {mtg_id}")
+    # mtg_id is already extracted at step 1.5
 
     # Extract end time
     end_str = _get_val(meeting_raw, ["end_time", "endDateTime", "end"])
@@ -259,19 +265,14 @@ def process_outlook_webhook(data: dict) -> dict:
     end_dt = parse_iso_datetime(end_str) if end_str else (start_dt + timedelta(minutes=30))
     logging.info(f"[OUTLOOK WEBHOOK] Parsed End Time (UTC): {end_dt}")
 
-    existing_mtg = db.execute_query("SELECT id FROM meetings WHERE outlook_event_id = ?", (mtg_id,), fetch_one=True)
-    logging.info(f"[OUTLOOK WEBHOOK] Existing meeting check: {existing_mtg}")
-    
-    if not existing_mtg:
-        logging.info(f"[OUTLOOK WEBHOOK] Inserting new meeting to DB: outlook_id={mtg_id}, start={start_dt}, end={end_dt}, client={client_id}")
-        db.execute_query(
-            "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, title) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?)",
-            (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, mtg_title),
-            commit=True
-        )
-        logging.info(f"[OUTLOOK WEBHOOK] Meeting saved to DB successfully")
-    else:
-        logging.info(f"[OUTLOOK WEBHOOK] Meeting already exists in DB, ID: {existing_mtg['id']}")
+    # No need for existing_mtg check here anymore as it was handled early
+    logging.info(f"[OUTLOOK WEBHOOK] Inserting new meeting to DB: outlook_id={mtg_id}, start={start_dt}, end={end_dt}, client={client_id}")
+    db.execute_query(
+        "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, title) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?)",
+        (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, mtg_title),
+        commit=True
+    )
+    logging.info(f"[OUTLOOK WEBHOOK] Meeting saved to DB successfully")
 
     # 9. Bot Join Scheduling
     meeting_link = _get_val(meeting_raw, ["online_meeting_url", "join_url", "onlineMeetingUrl"])
@@ -287,7 +288,7 @@ def process_outlook_webhook(data: dict) -> dict:
         try:
             import pytz
             start_dt_utc = start_dt.astimezone(pytz.utc) if start_dt.tzinfo else pytz.utc.localize(start_dt)
-            scheduled_time_str = start_dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            scheduled_time_str = start_dt_utc.strftime("%Y-%m-%dT%H:%M:%S+00:00")
             
             logging.info("=" * 60)
             logging.info(f"[BOT SCHEDULING] Attempting to schedule bot join")
@@ -295,7 +296,7 @@ def process_outlook_webhook(data: dict) -> dict:
             logging.info(f"[BOT SCHEDULING] Scheduled Time (UTC): {scheduled_time_str}")
             logging.info(f"[BOT SCHEDULING] Title: {mtg_title}")
             
-            aux_res = aux_service.schedule_meeting(meeting_link, scheduled_time_str, mtg_title)
+            aux_res = aux_service.schedule_meeting(meeting_link, scheduled_time_str, mtg_title, attendee_name="Rolplay (AI Coach)")
             
             if aux_res:
                 logging.info(f"[BOT SCHEDULING] SUCCESS! Aux ID: {aux_res.get('meetingId')}, Token: {aux_res.get('token')}")

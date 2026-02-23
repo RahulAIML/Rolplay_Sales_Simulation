@@ -5,7 +5,7 @@ import traceback
 
 AUX_BASE_URL = "https://coachlink360.aux-rolplay.com/api"
 
-def schedule_meeting(meeting_link, scheduled_time, title):
+def schedule_meeting(meeting_link, scheduled_time, title, attendee_name="Rolplay (AI Coach)"):
     """
     Schedules a meeting with the Aux API for transcript capture.
     Returns the meetingToken and meetingId on success.
@@ -14,7 +14,8 @@ def schedule_meeting(meeting_link, scheduled_time, title):
     payload = {
         "meetingLink": meeting_link,
         "scheduled_time": scheduled_time, # Expected ISO format
-        "title": title
+        "title": title,
+        "attendee_name": attendee_name
     }
     
     logging.info("=" * 60)
