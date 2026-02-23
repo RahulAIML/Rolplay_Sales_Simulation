@@ -364,7 +364,7 @@ def process_read_ai_webhook(data: dict):
                 # Notify
                 user = db.execute_query("SELECT name FROM clients WHERE id = ?", (m['client_id'],), fetch_one=True)
                 cname = user['name'] if user else "Client"
-                msg = f"ðŸ“ *Meeting Summary Ready ({cname})*\n\n{summary_text[:500]}...\n\nðŸ”— {report_url}"
+                msg = f"📝 *Meeting Summary Ready ({cname})*\n\n{summary_text[:500]}...\n\n📗— {report_url}"
                 whatsapp_service.send_whatsapp_message(m['salesperson_phone'], msg)
                 break
         except Exception: continue
@@ -601,16 +601,16 @@ def process_transcript_data(meeting_row, transcript_content, title, source, tran
             logging.info(f"[TRANSCRIPT DATA] Follow-up actions: {len(analysis.get('follow_up_actions', []))}")
             
             template_vars = {
-                "1": f"ðŸ§  *Post-Meeting Analysis ({title})*",
-                "2": f"ðŸ›‘ *Objections*:\n{objections}\n\nðŸ“ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
+                "1": f"🧠 *Post-Meeting Analysis ({title})*",
+                "2": f"ðŸ›‘ *Objections*:\n{objections}\n\n📝ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
                 "3": f"âš ï¸ *Risks*: {len(analysis.get('risks', []))} identified\n\nðŸš€ *Next Steps*:\n{next_steps}",
                 "4": "ðŸ‘‰ Reply *Done* after you have followed up."
             }
             
             msg_body = (
-                f"ðŸ§  *Post-Meeting Analysis ({title})*\n\n"
+                f"🧠 *Post-Meeting Analysis ({title})*\n\n"
                 f"ðŸ›‘ *Objections*:\n{objections}\n\n"
-                f"ðŸ“ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
+                f"📝ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
                 f"âš ï¸ *Risks*: {len(analysis.get('risks', []))} identified\n\n"
                 f"ðŸš€ *Next Steps*:\n{next_steps}\n\n"
                 f"ðŸ‘‰ Reply *Done* after you have followed up."
