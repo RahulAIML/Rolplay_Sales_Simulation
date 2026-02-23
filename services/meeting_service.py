@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 from datetime import datetime, timedelta
 from database import db
@@ -253,10 +253,13 @@ def process_outlook_webhook(data: dict) -> dict:
     mtg_title = _get_val(meeting_raw, ["title", "subject"], "Sales Meeting")
 
     # 7. SEND COACHING (Priority)
-    # If it's a retry and we already sent the coaching (status exists), we might want to skip sending again
-    # or just send it again if the user didn't get it. For now, let's skip re-sending if it was already 'scheduled'
-    if is_retry and existing_mtg.get('status') == 'scheduled':
-        logging.info(f"[OUTLOOK WEBHOOK] Skipping WhatsApp coaching for retry - already marked as scheduled.")
+    # Even if it's a retry, we'll try to send coaching again if it's been less than 1 hour since the last attempt
+    # or if the user specifically needs it. For now, we allow re-sending on retries to ensure delivery.
+    if is_retry:
+        logging.info(f"[OUTLOOK WEBHOOK] Retry detected - re-sending WhatsApp coaching to ensure delivery.")
+    
+    if False: # Placeholder for more complex skip logic if needed later
+        pass
     else:
         try:
             logging.info(f"[OUTLOOK WEBHOOK] Generating AI coaching for '{mtg_title}'...")
@@ -268,6 +271,7 @@ def process_outlook_webhook(data: dict) -> dict:
                 meeting_body=meeting_body,
                 location=location_str
             )
+            logging.info(f"[OUTLOOK WEBHOOK] AI Coaching Result: {coaching}")
             
             msg_body = (
                 f"🚀 *New Meeting: {mtg_title}*\n"
@@ -284,8 +288,9 @@ def process_outlook_webhook(data: dict) -> dict:
                 "4": f"💡 {coaching.get('recommended_reply')}"
             }
             
-            whatsapp_service.send_whatsapp_message(sp_phone, body=msg_body, use_template=True, template_vars=template_vars)
-            logging.info(f"[OUTLOOK WEBHOOK] Coaching WhatsApp message sent to {sp_phone}")
+            logging.info(f"[OUTLOOK WEBHOOK] Sending WhatsApp to {sp_phone}...")
+            wa_sid = whatsapp_service.send_whatsapp_message(sp_phone, body=msg_body, use_template=True, template_vars=template_vars)
+            logging.info(f"[OUTLOOK WEBHOOK] WhatsApp SID: {wa_sid}")
         except Exception as e:
             logging.error(f"[OUTLOOK WEBHOOK] AI Coaching/WhatsApp failed: {e}")
 
@@ -357,7 +362,7 @@ def process_read_ai_webhook(data: dict):
                 # Notify
                 user = db.execute_query("SELECT name FROM clients WHERE id = ?", (m['client_id'],), fetch_one=True)
                 cname = user['name'] if user else "Client"
-                msg = f"📝 *Meeting Summary Ready ({cname})*\n\n{summary_text[:500]}...\n\n🔗 {report_url}"
+                msg = f"ðŸ“ *Meeting Summary Ready ({cname})*\n\n{summary_text[:500]}...\n\nðŸ”— {report_url}"
                 whatsapp_service.send_whatsapp_message(m['salesperson_phone'], msg)
                 break
         except Exception: continue
@@ -395,7 +400,7 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
         hubspot_service = __import__('services.hubspot_service', fromlist=['sync_note_to_contact'])
         hubspot_service.sync_note_to_contact(m['client_id'], f"Feedback: {message_body}")
         
-        return "✅ Meeting marked as completed notes synced to CRM."
+        return "âœ… Meeting marked as completed notes synced to CRM."
     
     # Command: Chat (Default)
     # Get Context
@@ -426,7 +431,7 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
         s_dt = parse_iso_datetime(start) if start else None
         e_dt = parse_iso_datetime(end) if end else None
         if s_dt and e_dt:
-            # Use per-user timezone — falls back to APP_TIMEZONE then UTC
+            # Use per-user timezone â€” falls back to APP_TIMEZONE then UTC
             s_local = to_local_time(s_dt, tz_str=sp_tz)
             e_local = to_local_time(e_dt, tz_str=sp_tz)
             tz_abbr = s_local.strftime("%Z")
@@ -594,19 +599,19 @@ def process_transcript_data(meeting_row, transcript_content, title, source, tran
             logging.info(f"[TRANSCRIPT DATA] Follow-up actions: {len(analysis.get('follow_up_actions', []))}")
             
             template_vars = {
-                "1": f"🧠 *Post-Meeting Analysis ({title})*",
-                "2": f"🛑 *Objections*:\n{objections}\n\n📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
-                "3": f"⚠️ *Risks*: {len(analysis.get('risks', []))} identified\n\n🚀 *Next Steps*:\n{next_steps}",
-                "4": "👉 Reply *Done* after you have followed up."
+                "1": f"ðŸ§  *Post-Meeting Analysis ({title})*",
+                "2": f"ðŸ›‘ *Objections*:\n{objections}\n\nðŸ“ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
+                "3": f"âš ï¸ *Risks*: {len(analysis.get('risks', []))} identified\n\nðŸš€ *Next Steps*:\n{next_steps}",
+                "4": "ðŸ‘‰ Reply *Done* after you have followed up."
             }
             
             msg_body = (
-                f"🧠 *Post-Meeting Analysis ({title})*\n\n"
-                f"🛑 *Objections*:\n{objections}\n\n"
-                f"📈 *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
-                f"⚠️ *Risks*: {len(analysis.get('risks', []))} identified\n\n"
-                f"🚀 *Next Steps*:\n{next_steps}\n\n"
-                f"👉 Reply *Done* after you have followed up."
+                f"ðŸ§  *Post-Meeting Analysis ({title})*\n\n"
+                f"ðŸ›‘ *Objections*:\n{objections}\n\n"
+                f"ðŸ“ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
+                f"âš ï¸ *Risks*: {len(analysis.get('risks', []))} identified\n\n"
+                f"ðŸš€ *Next Steps*:\n{next_steps}\n\n"
+                f"ðŸ‘‰ Reply *Done* after you have followed up."
             )
             
             logging.info(f"[TRANSCRIPT DATA] Sending WhatsApp notification to {phone}")

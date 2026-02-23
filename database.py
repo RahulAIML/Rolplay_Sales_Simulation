@@ -25,7 +25,8 @@ class DBHandler:
             # We'll stick to manual commit to match SQLite behavior in app.py
             return conn
         else:
-            conn = sqlite3.connect("coachlink.db", timeout=30.0)
+            db_path = os.getenv("SQLITE_DB_PATH", "coachlink.db")
+            conn = sqlite3.connect(db_path, timeout=30.0)
             conn.row_factory = sqlite3.Row
             return conn
 

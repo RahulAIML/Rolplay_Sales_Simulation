@@ -4,16 +4,16 @@ import os
 import traceback
 import json
 
-AUX_BASE_URL = "https://coachlink360.aux-rolplay.com/api"
+AUX_BASE_URL = os.getenv("AUX_BASE_URL", "https://coachlink360.aux-rolplay.com/api")
+AUX_FALLBACK_URL = os.getenv("AUX_FALLBACK_URL")
 
 def schedule_meeting(meeting_link, scheduled_time, title, attendee_name="Rolplay (AI Coach)"):
     """
     Schedules a meeting with the Aux API for transcript capture.
-    Returns the meetingToken and meetingId on success.
+    Tries primary URL, then fallback if configured.
     """
     url = f"{AUX_BASE_URL}/meetings/schedule"
     
-    # Use both formats for robustness as different providers might expect different casing
     payload = {
         "meetingLink": meeting_link,
         "scheduled_time": scheduled_time, 
@@ -23,49 +23,35 @@ def schedule_meeting(meeting_link, scheduled_time, title, attendee_name="Rolplay
         "attendeeName": attendee_name
     }
     
-    logging.info("=" * 60)
-    logging.info(f"[AUX API] schedule_meeting() called")
-    logging.info(f"[AUX API] URL: {url}")
-    logging.info(f"[AUX API] Final Payload for Scheduling: {json.dumps(payload)}")
-    
-    try:
-        logging.info(f"[AUX API] Sending POST request...")
-        response = requests.post(url, json=payload, timeout=15)
-        
-        logging.info(f"[AUX API] Response Status: {response.status_code}")
-        logging.info(f"[AUX API] Response Headers: {dict(response.headers)}")
-        
-        if response.status_code != 200:
-            logging.error(f"[AUX API] ERROR: Status {response.status_code}")
-            logging.error(f"[AUX API] Response Body: {response.text}")
-            return None
+    urls = [f"{AUX_BASE_URL}/meetings/schedule"]
+    if AUX_FALLBACK_URL:
+        urls.append(f"{AUX_FALLBACK_URL}/meetings/schedule")
+
+    last_error = None
+    for url in urls:
+        logging.info("=" * 60)
+        logging.info(f"[AUX API] Attempting schedule at: {url}")
+        try:
+            response = requests.post(url, json=payload, timeout=15)
+            logging.info(f"[AUX API] Response Status: {response.status_code}")
             
-        data = response.json()
-        logging.info(f"[AUX API] Response Data: {data}")
-        
-        if data.get("success"):
-            meeting_id = data.get('meetingId')
-            token = data.get('meetingToken')
-            provider = data.get('provider', 'unknown')
-            logging.info(f"[AUX API] SUCCESS! meetingId={meeting_id}, token={token}, provider={provider}")
-            return {
-                "meetingId": meeting_id,
-                "token": token
-            }
-        else:
-            logging.error(f"[AUX API] ERROR: API returned success=false")
-            logging.error(f"[AUX API] Full response: {data}")
-            return None
-    except requests.exceptions.Timeout:
-        logging.error(f"[AUX API] ERROR: Request timeout after 15s")
-        return None
-    except requests.exceptions.RequestException as e:
-        logging.error(f"[AUX API] ERROR: Request failed - {e}")
-        return None
-    except Exception as e:
-        logging.error(f"[AUX API] ERROR: Unexpected exception - {e}")
-        logging.error(f"[AUX API] Traceback: {traceback.format_exc()}")
-        return None
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success"):
+                    meeting_id = data.get('meetingId')
+                    token = data.get('meetingToken')
+                    logging.info(f"[AUX API] SUCCESS at {url}! meetingId={meeting_id}, token={token}")
+                    return {"meetingId": meeting_id, "token": token}
+                else:
+                    logging.warning(f"[AUX API] API success=false at {url}: {data}")
+            else:
+                logging.warning(f"[AUX API] HTTP {response.status_code} at {url}: {response.text}")
+        except Exception as e:
+            logging.error(f"[AUX API] Failed at {url}: {e}")
+            last_error = e
+            
+    logging.error(f"[AUX API] All scheduling attempts failed. Last error: {last_error}")
+    return None
 
 def get_meeting_status(token):
     """
