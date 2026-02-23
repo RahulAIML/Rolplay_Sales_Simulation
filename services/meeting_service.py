@@ -158,35 +158,49 @@ def process_outlook_webhook(data: dict) -> dict:
     c_phone = _get_val(client_raw, ["phone", "phoneNumber", "mobilePhone"])
     c_company = _get_val(client_raw, ["company", "companyName", "organization"])
     
-    logging.info(f"[OUTLOOK WEBHOOK] Client: {c_name} <{c_email}> | Phone: {c_phone} | Company: {c_company}")
-
     # 5. DB & HubSpot Sync (Pre-Coaching)
     client_id = None
+    hs_context_str = ""
     if c_email:
-        c_exist = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
+        c_exist = db.execute_query("SELECT id, phone, company FROM clients WHERE email = ?", (c_email,), fetch_one=True)
         if c_exist:
             client_id = c_exist['id']
-            db.execute_query("UPDATE clients SET name=?, phone=?, company=? WHERE email=?", (c_name, c_phone, c_company, c_email), commit=True)
+            # Only overwrite if we have fresh data
+            update_fields = []
+            update_vals = []
+            if c_name: update_fields.append("name=?"); update_vals.append(c_name)
+            if c_phone: update_fields.append("phone=?"); update_vals.append(c_phone)
+            if c_company: update_fields.append("company=?"); update_vals.append(c_company)
+            if update_fields:
+                db.execute_query(f"UPDATE clients SET {', '.join(update_fields)} WHERE id=?", (*update_vals, client_id), commit=True)
         else:
             db.execute_query("INSERT INTO clients (email, name, phone, company) VALUES (?, ?, ?, ?)", (c_email, c_name, c_phone, c_company), commit=True)
             res = db.execute_query("SELECT id FROM clients WHERE email = ?", (c_email,), fetch_one=True)
             client_id = res['id']
 
-    hs_context_str = ""
-    if client_id and c_email:
+        # Reverse Sync from HubSpot if data is still missing
         try:
             hubspot_service = __import__('services.hubspot_service', fromlist=['create_or_find_contact', 'get_contact_details'])
-            # Pass mobile phone to HubSpot as well
             hs_contact_id = hubspot_service.create_or_find_contact(c_email, c_name, c_phone or "")
             if hs_contact_id:
                 db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_contact_id, client_id), commit=True)
                 hs_details = hubspot_service.get_contact_details(hs_contact_id)
                 if hs_details:
+                    # Sync back missing phone/company to DB
+                    hs_phone = hs_details.get("mobilephone") or hs_details.get("phone")
+                    hs_comp = hs_details.get("company")
+                    if hs_phone or hs_comp:
+                        db.execute_query("UPDATE clients SET phone=COALESCE(phone, ?), company=COALESCE(company, ?) WHERE id=?", (hs_phone, hs_comp, client_id), commit=True)
+                        if hs_phone: c_phone = hs_phone
+                        if hs_comp: c_company = hs_comp
+
                     hs_context_str = "\n\n[HubSpot context]\n"
                     for k in ['jobtitle', 'company', 'industry', 'lifecyclestage']:
                         if hs_details.get(k): hs_context_str += f"{k.capitalize()}: {hs_details.get(k)}\n"
         except Exception as e:
             logging.error(f"HubSpot Enrichment Error: {e}")
+
+    logging.info(f"[OUTLOOK WEBHOOK] Prepared Client: {c_name} | Phone: {c_phone} | Company: {c_company}")
 
     # 6. Prepare Coaching Plan
     start_str = _get_val(meeting_raw, ["start_time", "startDateTime", "start"])
