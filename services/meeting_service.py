@@ -1,5 +1,6 @@
-﻿import logging
+import logging
 import os
+import json
 from datetime import datetime, timedelta
 from database import db
 from utils import normalize_phone, parse_iso_datetime, to_local_time, get_current_utc_time
@@ -85,6 +86,102 @@ def _extract_email(o):
             return str(res).strip().lower()
     return None
 
+def _extract_attendee_name(att):
+    """Extract attendee display name from heterogeneous payload shapes."""
+    if isinstance(att, str) or not isinstance(att, dict):
+        return None
+
+    direct = _get_val(att, ["name", "displayName", "fullName"])
+    if direct:
+        return str(direct).strip()
+
+    email_obj = _get_val(att, ["emailAddress", "EmailAddress"])
+    if isinstance(email_obj, dict):
+        nested = _get_val(email_obj, ["name", "displayName"])
+        if nested:
+            return str(nested).strip()
+
+    return None
+
+def _collect_attendees(meeting_raw, org_email=None):
+    """Collect normalized attendees [{name,email}] from multiple key variations."""
+    attendee_keys = ["attendees", "requiredAttendees", "optionalAttendees", "participants", "invitees"]
+    attendees = []
+    seen = set()
+
+    for key in attendee_keys:
+        raw = _get_val(meeting_raw, [key], [])
+        if raw and not isinstance(raw, list):
+            raw = [raw]
+
+        for att in (raw or []):
+            email = _extract_email(att)
+            if not email:
+                continue
+            if org_email and email == org_email:
+                continue
+            if email in seen:
+                continue
+
+            seen.add(email)
+            attendees.append({
+                "name": _extract_attendee_name(att) or "Guest",
+                "email": email
+            })
+
+    return attendees
+
+def extract_aux_transcript_content(aux_data):
+    """
+    Best-effort extraction for Aux transcript payloads.
+    Supports multiple structures to avoid dropping valid transcripts.
+    """
+    if not isinstance(aux_data, dict):
+        return ""
+
+    candidates = [
+        aux_data.get("transcript_content"),
+        aux_data.get("transcriptText"),
+        aux_data.get("raw_transcript"),
+    ]
+
+    transcript_obj = aux_data.get("transcript")
+    if isinstance(transcript_obj, str):
+        candidates.append(transcript_obj)
+    elif isinstance(transcript_obj, dict):
+        candidates.extend([
+            transcript_obj.get("content"),
+            transcript_obj.get("text"),
+            transcript_obj.get("raw"),
+        ])
+
+        utterances = transcript_obj.get("utterances") or transcript_obj.get("segments")
+        if isinstance(utterances, list):
+            merged = []
+            for u in utterances:
+                if isinstance(u, dict):
+                    speaker = u.get("speaker") or u.get("name") or "Speaker"
+                    text = u.get("text") or u.get("content") or ""
+                    if text:
+                        merged.append(f"{speaker}: {text}")
+                elif isinstance(u, str):
+                    merged.append(u)
+            if merged:
+                candidates.append("\n".join(merged))
+
+    transcription_obj = aux_data.get("transcription")
+    if isinstance(transcription_obj, dict):
+        candidates.extend([
+            transcription_obj.get("content"),
+            transcription_obj.get("text")
+        ])
+
+    for val in candidates:
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    return ""
+
 def process_outlook_webhook(data: dict) -> dict:
     """
     Main entry point for processing webhook data from Make.com.
@@ -147,14 +244,10 @@ def process_outlook_webhook(data: dict) -> dict:
     client_raw = _get_val(data, ["client", "Client", "participant", "contact"])
     c_email = _extract_email(client_raw)
     
-    if not c_email:
-        attendees = _get_val(meeting_raw, ["attendees"], [])
-        if isinstance(attendees, list):
-            for att in attendees:
-                ae = _extract_email(att)
-                if ae and ae != org_email:
-                    c_email = ae
-                    break
+    attendee_objects = _collect_attendees(meeting_raw, org_email=org_email)
+
+    if not c_email and attendee_objects:
+        c_email = attendee_objects[0]["email"]
 
     c_name = _get_val(client_raw, ["name", "displayName", "fullName", "first_name"], "Valued Client")
     c_phone = _get_val(client_raw, ["phone", "phoneNumber", "mobilePhone"])
@@ -209,18 +302,22 @@ def process_outlook_webhook(data: dict) -> dict:
     start_dt = parse_iso_datetime(start_str) if start_str else get_current_utc_time()
     
     # Body parsing - handle stringified JSON and HTML
-    body_raw = _get_val(meeting_raw, ["body", "content", "description"])
+    body_raw = _get_val(
+        meeting_raw,
+        ["body", "content", "description", "bodyPreview", "body_preview", "agenda", "notes"]
+    )
     meeting_body = ""
     
     if isinstance(body_raw, str) and body_raw.strip().startswith('{'):
         try:
-            import json
             body_json = json.loads(body_raw)
             body_raw = body_json.get("content") or body_json.get("Content") or body_raw
         except: pass
 
     if isinstance(body_raw, dict):
-        meeting_body = body_raw.get("content") or body_raw.get("Content") or ""
+        meeting_body = body_raw.get("content") or body_raw.get("Content") or body_raw.get("body") or ""
+    elif isinstance(body_raw, list):
+        meeting_body = " ".join([str(x) for x in body_raw if x])
     else:
         meeting_body = str(body_raw or "")
     
@@ -233,13 +330,7 @@ def process_outlook_webhook(data: dict) -> dict:
     meeting_body += hs_context_str
     
     # Extract Attendees for AI
-    atts_raw = _get_val(meeting_raw, ["attendees"], [])
-    attendee_list = []
-    if isinstance(atts_raw, list):
-        for att in atts_raw:
-            email = _extract_email(att)
-            name = _get_val(att, ["name", "displayName", "emailAddress.name"]) if isinstance(att, dict) else None
-            if email: attendee_list.append(f"{name or 'Guest'} <{email}>")
+    attendee_list = [f"{a['name']} <{a['email']}>" for a in attendee_objects]
     
     if attendee_list:
         meeting_body += "\n\n[Attendees Participating]\n" + "\n".join(attendee_list)
@@ -303,14 +394,14 @@ def process_outlook_webhook(data: dict) -> dict:
     if is_retry:
         logging.info(f"[OUTLOOK WEBHOOK] Updating existing meeting Record ID: {existing_mtg['id']}")
         db.execute_query(
-            "UPDATE meetings SET start_time=?, end_time=?, client_id=?, location=?, title=? WHERE outlook_event_id=?",
-            (start_dt, end_dt, client_id, location_str, mtg_title, mtg_id), commit=True
+            "UPDATE meetings SET start_time=?, end_time=?, client_id=?, location=?, title=?, attendees=?, summary=?, survey_status=COALESCE(survey_status, 'pending') WHERE outlook_event_id=?",
+            (start_dt, end_dt, client_id, location_str, mtg_title, json.dumps(attendee_objects), meeting_body[:4000], mtg_id), commit=True
         )
     else:
         logging.info(f"[OUTLOOK WEBHOOK] Inserting new meeting: {mtg_id}")
         db.execute_query(
-            "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, title) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?)",
-            (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, mtg_title), commit=True
+            "INSERT INTO meetings (outlook_event_id, start_time, end_time, client_id, status, salesperson_phone, location, title, attendees, summary, survey_status) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, 'pending')",
+            (mtg_id, start_dt, end_dt, client_id, sp_phone, location_str, mtg_title, json.dumps(attendee_objects), meeting_body[:4000]), commit=True
         )
 
     # 9. Bot Join Scheduling
@@ -381,8 +472,8 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     
     # Find active meeting for this sender
     m = db.execute_query(
-        "SELECT * FROM meetings WHERE salesperson_phone = ? AND status IN ('scheduled', 'reminder_sent') ORDER BY id DESC LIMIT 1", 
-        (sender,), 
+        "SELECT * FROM meetings WHERE (salesperson_phone = ? OR REPLACE(salesperson_phone, 'whatsapp:', '') = REPLACE(?, 'whatsapp:', '')) AND status IN ('scheduled', 'reminder_sent') ORDER BY id DESC LIMIT 1",
+        (sender, sender),
         fetch_one=True
     )
     
@@ -418,6 +509,13 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     end = m.get('end_time')
     loc = m.get('location') or 'Unknown'
     atts = m.get('attendees') or 'Unknown'
+    if isinstance(atts, str) and atts.startswith("["):
+        try:
+            parsed_atts = json.loads(atts)
+            if isinstance(parsed_atts, list):
+                atts = ", ".join([f"{a.get('name', 'Guest')} <{a.get('email', '')}>" for a in parsed_atts[:10]])
+        except Exception:
+            pass
     
     # Look up salesperson's timezone for correct local time display
     sp_tz = None
@@ -529,8 +627,7 @@ def process_aux_transcript(meeting_row, aux_data):
     logging.info(f"[AUX TRANSCRIPT] process_aux_transcript() called for meeting {meeting_id}")
     logging.info(f"[AUX TRANSCRIPT] Aux data keys: {list(aux_data.keys()) if isinstance(aux_data, dict) else 'not a dict'}")
     
-    transcript_info = aux_data.get("transcript", {})
-    content = transcript_info.get("content", "")
+    content = extract_aux_transcript_content(aux_data)
     title = aux_data.get("title", "Aux Meeting")
     
     logging.info(f"[AUX TRANSCRIPT] Transcript title: {title}")

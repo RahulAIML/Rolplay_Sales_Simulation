@@ -120,7 +120,8 @@ class DBHandler:
                     attendees TEXT,
                     aux_meeting_id INTEGER,
                     aux_meeting_token TEXT,
-                    title TEXT
+                    title TEXT,
+                    survey_status TEXT DEFAULT 'pending'
                 );
             """
             create_usr_sql = """
@@ -205,6 +206,7 @@ class DBHandler:
                     aux_meeting_id INTEGER,
                     aux_meeting_token TEXT,
                     title TEXT,
+                    survey_status TEXT DEFAULT 'pending',
                     FOREIGN KEY(client_id) REFERENCES clients(id)
                 );
             """
@@ -290,7 +292,8 @@ class DBHandler:
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS attendees TEXT",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS aux_meeting_id INTEGER",
                         "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS aux_meeting_token TEXT",
-                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS title TEXT"
+                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS title TEXT",
+                        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS survey_status TEXT DEFAULT 'pending'"
                     ]
                 else:
                     # SQLite doesn't support IF NOT EXISTS in ALTER COLUMN easily, 
@@ -324,6 +327,8 @@ class DBHandler:
                         cur.execute("ALTER TABLE meetings ADD COLUMN aux_meeting_token TEXT")
                     if 'title' not in cols:
                         cur.execute("ALTER TABLE meetings ADD COLUMN title TEXT")
+                    if 'survey_status' not in cols:
+                        cur.execute("ALTER TABLE meetings ADD COLUMN survey_status TEXT DEFAULT 'pending'")
 
                     # Users
                     cur.execute("PRAGMA table_info(users)")

@@ -6,8 +6,21 @@ import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import db
-from utils import parse_iso_datetime
+from utils import parse_iso_datetime, normalize_phone
 from services import whatsapp_service, aux_service, meeting_service
+
+def _is_truthy(val):
+    return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+def _row_get(row, key, default=None):
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
 
 def check_pending_meetings():
     """
@@ -24,14 +37,17 @@ def check_pending_meetings():
     logging.info("=" * 60)
     logging.info(f"[SCHEDULER] check_pending_meetings() started at {now_utc}")
     
-    meetings = db.execute_query("SELECT * FROM meetings WHERE status = 'scheduled'", fetch_all=True) or []
-    logging.info(f"[SCHEDULER] Found {len(meetings)} meetings with status='scheduled'")
+    meetings = db.execute_query(
+        "SELECT * FROM meetings WHERE status IN ('scheduled', 'reminder_sent')",
+        fetch_all=True
+    ) or []
+    logging.info(f"[SCHEDULER] Found {len(meetings)} meetings with status in ('scheduled','reminder_sent')")
     
     for m in meetings:
         try:
             meeting_id = m['id']
-            logging.info(f"[SCHEDULER] Processing meeting {meeting_id}: {m.get('title', 'Untitled')}")
-            logging.info(f"[SCHEDULER] Meeting data: outlook_id={m.get('outlook_event_id')}, start={m.get('start_time')}, end={m.get('end_time')}, aux_token={m.get('aux_meeting_token')}")
+            logging.info(f"[SCHEDULER] Processing meeting {meeting_id}: {_row_get(m, 'title', 'Untitled')}")
+            logging.info(f"[SCHEDULER] Meeting data: outlook_id={_row_get(m, 'outlook_event_id')}, start={_row_get(m, 'start_time')}, end={_row_get(m, 'end_time')}, aux_token={_row_get(m, 'aux_meeting_token')}")
             
             # End Time Parsing
             if m['end_time']:
@@ -50,6 +66,8 @@ def check_pending_meetings():
             if now_utc >= (end_dt + timedelta(minutes=1)):
                 logging.info(f"[SCHEDULER] Meeting {meeting_id} has finished (past end time + 1min buffer)")
                 target_phone = m['salesperson_phone']
+                current_status = (str(_row_get(m, "status", "")) or "").strip().lower()
+                survey_status = (str(_row_get(m, "survey_status", "pending")) or "pending").strip().lower()
                 
                 # Check if we should message (Registered Users Only)
                 if not target_phone:
@@ -65,40 +83,65 @@ def check_pending_meetings():
                 logging.info(f"[SCHEDULER] Meeting {meeting_id} client: {cname} ({client_email})")
 
                 # Get Salesperson Email
-                user = db.execute_query("SELECT email FROM users WHERE phone = ?", (target_phone,), fetch_one=True)
+                normalized_target = normalize_phone(target_phone)
+                user = db.execute_query(
+                    "SELECT email FROM users WHERE phone = ? OR phone = ? OR REPLACE(phone, 'whatsapp:', '') = REPLACE(?, 'whatsapp:', '') LIMIT 1",
+                    (target_phone, normalized_target, target_phone),
+                    fetch_one=True
+                )
                 sp_email = user['email'] if user else None
                 logging.info(f"[SCHEDULER] Meeting {meeting_id} salesperson: {sp_email}")
                 
-                # Trigger Survey Webhook (Replaces Read.ai email flow)
-                try:
-                    webhook_payload = {
-                        "meeting_id": meeting_id,
-                        "aux_meeting_id": m['aux_meeting_id'],
-                        "title": m.get('title', 'Sales Meeting'),
-                        "organizer_email": sp_email,
-                        "client_email": client_email,
-                        "client_name": cname,
-                        "status": "finished"
-                    }
-                    logging.info(f"[SCHEDULER] Triggering survey webhook for meeting {meeting_id}")
-                    aux_service.trigger_survey_webhook(webhook_payload)
-                    logging.info(f"[SCHEDULER] Survey webhook triggered for meeting {meeting_id}")
-                except Exception as e:
-                    logging.error(f"[SCHEDULER] Failed to trigger survey webhook for meeting {meeting_id}: {e}")
+                # Trigger Survey Webhook (retryable until sent)
+                if survey_status != "sent":
+                    try:
+                        webhook_payload = {
+                            "meeting_id": meeting_id,
+                            "aux_meeting_id": m['aux_meeting_id'],
+                            "title": _row_get(m, 'title', 'Sales Meeting'),
+                            "organizer_email": sp_email,
+                            "client_email": client_email,
+                            "client_name": cname,
+                            "status": "finished"
+                        }
+                        logging.info(f"[SCHEDULER] Triggering survey webhook for meeting {meeting_id}")
+                        survey_result = aux_service.trigger_survey_webhook(webhook_payload)
+                        if survey_result:
+                            db.execute_query(
+                                "UPDATE meetings SET survey_status = 'sent' WHERE id = ?",
+                                (meeting_id,),
+                                commit=True
+                            )
+                            logging.info(f"[SCHEDULER] Survey webhook triggered for meeting {meeting_id}")
+                        else:
+                            db.execute_query(
+                                "UPDATE meetings SET survey_status = 'failed' WHERE id = ?",
+                                (meeting_id,),
+                                commit=True
+                            )
+                            logging.warning(f"[SCHEDULER] Survey webhook trigger returned no result for meeting {meeting_id}")
+                    except Exception as e:
+                        db.execute_query(
+                            "UPDATE meetings SET survey_status = 'failed' WHERE id = ?",
+                            (meeting_id,),
+                            commit=True
+                        )
+                        logging.error(f"[SCHEDULER] Failed to trigger survey webhook for meeting {meeting_id}: {e}")
 
-                # Send WhatsApp Reminder
-                msg = f"🔔 Meeting with {cname} finished. How did it go? (Reply 'Done' to log to HubSpot)"
-                logging.info(f"[SCHEDULER] Sending WhatsApp reminder to {target_phone}")
-                whatsapp_service.send_whatsapp_message(target_phone, msg)
-                
-                # Update Status
-                db.execute_query("UPDATE meetings SET status = 'reminder_sent' WHERE id = ?", (meeting_id,), commit=True)
-                logging.info(f"[SCHEDULER] Meeting {meeting_id} marked as 'reminder_sent'")
+                # Send WhatsApp reminder only once (when transitioning from scheduled)
+                if current_status == "scheduled":
+                    msg = f"ðŸ”” Meeting with {cname} finished. How did it go? (Reply 'Done' to log to HubSpot)"
+                    logging.info(f"[SCHEDULER] Sending WhatsApp reminder to {target_phone}")
+                    whatsapp_service.send_whatsapp_message(target_phone, msg)
+                    
+                    # Update Status
+                    db.execute_query("UPDATE meetings SET status = 'reminder_sent' WHERE id = ?", (meeting_id,), commit=True)
+                    logging.info(f"[SCHEDULER] Meeting {meeting_id} marked as 'reminder_sent'")
             else:
                 logging.info(f"[SCHEDULER] Meeting {meeting_id} still in progress or upcoming")
                 
         except Exception as e:
-            logging.error(f"[SCHEDULER] ERROR processing meeting {m.get('id')}: {e}")
+            logging.error(f"[SCHEDULER] ERROR processing meeting {_row_get(m, 'id')}: {e}")
             import traceback
             logging.error(f"[SCHEDULER] Traceback: {traceback.format_exc}")
     
@@ -110,7 +153,7 @@ def check_pending_meetings():
     
     # We poll meetings with a token and status 'scheduled' or 'reminder_sent'
     aux_meetings = db.execute_query(
-        "SELECT * FROM meetings WHERE aux_meeting_token IS NOT NULL AND status IN ('scheduled', 'reminder_sent', 'pending') ORDER BY id DESC LIMIT 2", 
+        "SELECT * FROM meetings WHERE aux_meeting_token IS NOT NULL AND status IN ('scheduled', 'reminder_sent', 'pending') ORDER BY id DESC LIMIT 25",
         fetch_all=True
     ) or []
     
@@ -119,7 +162,7 @@ def check_pending_meetings():
     for am in aux_meetings:
         meeting_id = am['id']
         token = am['aux_meeting_token']
-        start_time_str = am.get('start_time')
+        start_time_str = _row_get(am, 'start_time')
         
         # Deduplication/Efficiency: Skip polling if meeting is too old (e.g. > 24 hours) or too far in future
         if start_time_str:
@@ -148,7 +191,11 @@ def check_pending_meetings():
                 bot_state = status_data.get("attendee_bot_state")
                 logging.info(f"[SCHEDULER] Meeting {meeting_id} AUX status: {api_status}, bot_state: {bot_state}")
                 
-                if api_status == "completed":
+                transcript_preview = meeting_service.extract_aux_transcript_content(status_data)
+                terminal_statuses = {"completed", "complete", "done", "processed", "transcribed"}
+                should_process = (str(api_status).lower() in terminal_statuses) or bool(transcript_preview)
+
+                if should_process:
                     logging.info(f"[SCHEDULER] Meeting {meeting_id} is completed. Processing transcript...")
                     success = meeting_service.process_aux_transcript(am, status_data)
                     
@@ -184,18 +231,30 @@ def check_pending_meetings():
             logging.error(f"Survey polling error: {e}")
 
 def start_scheduler():
-    """Starts the background scheduler if running on Render (Production)."""
+    """Starts the background scheduler unless explicitly disabled."""
     render_env = os.environ.get("RENDER")
     logging.info(f"[SCHEDULER] start_scheduler() called")
     logging.info(f"[SCHEDULER] RENDER env var: {render_env}")
-    
-    if render_env == "true":
-        logging.info("[SCHEDULER] Starting BackgroundScheduler with 60s interval")
-        scheduler = BackgroundScheduler()
-        scheduler.add_job(func=check_pending_meetings, trigger="interval", seconds=60)
-        scheduler.start()
-        atexit.register(lambda: scheduler.shutdown())
-        logging.info("[SCHEDULER] Scheduler started successfully")
-    else:
-        logging.info("[SCHEDULER] Scheduler skipped (Not in Production Mode - RENDER != 'true')")
-        logging.info("[SCHEDULER] To enable scheduler locally, set RENDER=true")
+
+    if not _is_truthy(os.getenv("ENABLE_SCHEDULER", "true")):
+        logging.info("[SCHEDULER] Scheduler disabled via ENABLE_SCHEDULER")
+        return
+
+    if not _is_truthy(os.getenv("SCHEDULER_LEADER", "true")):
+        logging.info("[SCHEDULER] Scheduler not started on this instance (SCHEDULER_LEADER=false)")
+        return
+
+    logging.info("[SCHEDULER] Starting BackgroundScheduler with 60s interval")
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(
+        func=check_pending_meetings,
+        trigger="interval",
+        seconds=60,
+        id="check_pending_meetings",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+    scheduler.start()
+    atexit.register(lambda: scheduler.shutdown())
+    logging.info("[SCHEDULER] Scheduler started successfully")
