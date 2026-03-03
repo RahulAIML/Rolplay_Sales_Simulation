@@ -16,11 +16,8 @@ def schedule_meeting(meeting_link, scheduled_time, title, attendee_name="Rolplay
     
     payload = {
         "meetingLink": meeting_link,
-        "meeting_link": meeting_link,
-        "scheduled_time": scheduled_time, 
         "scheduledTime": scheduled_time,
         "title": title,
-        "attendee_name": attendee_name,
         "attendeeName": attendee_name
     }
     
@@ -93,6 +90,57 @@ def get_meeting_status(token):
         logging.error(f"[AUX API] ERROR: Status check exception - {e}")
         logging.error(f"[AUX API] Traceback: {traceback.format_exc()}")
         return None
+
+def get_meeting_transcript(meeting_no):
+    """
+    Fetch transcript for a meeting from:
+    /api/meetings/{meeting_no}/transcript
+    """
+    if not meeting_no:
+        logging.warning("[AUX API] get_meeting_transcript called without meeting_no")
+        return None
+
+    urls = [f"{AUX_BASE_URL}/meetings/{meeting_no}/transcript"]
+    if AUX_FALLBACK_URL:
+        urls.append(f"{AUX_FALLBACK_URL}/meetings/{meeting_no}/transcript")
+
+    for url in urls:
+        try:
+            logging.info(f"[AUX API] Fetching transcript from: {url}")
+            response = requests.get(url, timeout=12)
+            logging.info(f"[AUX API] Transcript response code: {response.status_code}")
+
+            if response.status_code == 404:
+                logging.info(f"[AUX API] Transcript not ready yet for meeting {meeting_no} at {url}")
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get("success"):
+                logging.warning(f"[AUX API] Transcript success=false for meeting {meeting_no}: {data}")
+                continue
+
+            transcript = data.get("transcript") or {}
+            content = transcript.get("content") if isinstance(transcript, dict) else None
+            if content:
+                logging.info(
+                    f"[AUX API] Transcript fetched for meeting {meeting_no}: "
+                    f"id={transcript.get('id')}, chars={len(content)}"
+                )
+                return transcript
+
+            logging.info(f"[AUX API] Transcript payload present but content empty for meeting {meeting_no}")
+        except requests.exceptions.Timeout:
+            logging.error(f"[AUX API] Transcript request timeout for meeting {meeting_no} at {url}")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"[AUX API] Transcript request failed for meeting {meeting_no} at {url}: {e}")
+        except Exception as e:
+            logging.error(f"[AUX API] Transcript fetch exception for meeting {meeting_no} at {url}: {e}")
+            logging.error(f"[AUX API] Traceback: {traceback.format_exc()}")
+
+    return None
+
 def trigger_survey_webhook(meeting_data):
     """
     Triggers the external webhook to send a survey link to the client/organizer.

@@ -29,6 +29,38 @@ def _get_val(d: dict, keys: list, default=None):
             
     return default
 
+def _row_get(row, key, default=None):
+    """Safe accessor for sqlite Row / dict objects."""
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+def _build_meeting_summary_from_lines(lines, max_chars=1200):
+    """
+    Build a compact post-meeting summary from transcript lines.
+    This is used for CRM logging even if AI output is partially unavailable.
+    """
+    if not lines:
+        return "Transcript captured, but no readable lines were parsed."
+
+    preview = []
+    for line in lines[:8]:
+        speaker = str(line.get("speaker", "Speaker")).strip()
+        text = str(line.get("text", "")).strip()
+        if not text:
+            continue
+        preview.append(f"{speaker}: {text}")
+
+    summary = "\n".join(preview).strip() or "Transcript captured."
+    if len(summary) > max_chars:
+        return summary[:max_chars].rstrip() + "..."
+    return summary
+
 def _extract_meeting_link(text: str) -> str:
     """Detects meeting platform link, unwrapping safelinks if needed."""
     if not text: return None
@@ -472,13 +504,13 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     
     # Find active meeting for this sender
     m = db.execute_query(
-        "SELECT * FROM meetings WHERE (salesperson_phone = ? OR REPLACE(salesperson_phone, 'whatsapp:', '') = REPLACE(?, 'whatsapp:', '')) AND status IN ('scheduled', 'reminder_sent') ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM meetings WHERE (salesperson_phone = ? OR REPLACE(salesperson_phone, 'whatsapp:', '') = REPLACE(?, 'whatsapp:', '')) AND status IN ('scheduled', 'reminder_sent', 'completed') ORDER BY id DESC LIMIT 1",
         (sender, sender),
         fetch_one=True
     )
     
     if not m:
-        return "No active meeting found pending feedback."
+        return "No meeting found for this number."
 
     # Log Message
     db.execute_query(
@@ -492,8 +524,8 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
         db.execute_query("UPDATE meetings SET status='completed' WHERE id=?", (m['id'],), commit=True)
         hubspot_service = __import__('services.hubspot_service', fromlist=['sync_note_to_contact'])
         hubspot_service.sync_note_to_contact(m['client_id'], f"Feedback: {message_body}")
-        
-        return "âœ… Meeting marked as completed notes synced to CRM."
+
+        return "Meeting marked as completed and feedback synced to HubSpot."
     
     # Command: Chat (Default)
     # Get Context
@@ -622,23 +654,51 @@ def process_aux_transcript(meeting_row, aux_data):
     """
     Processes transcript data specifically from the Aux API response.
     """
-    meeting_id = meeting_row.get('id', 'unknown')
+    meeting_id = _row_get(meeting_row, "id", "unknown")
     logging.info("=" * 60)
     logging.info(f"[AUX TRANSCRIPT] process_aux_transcript() called for meeting {meeting_id}")
-    logging.info(f"[AUX TRANSCRIPT] Aux data keys: {list(aux_data.keys()) if isinstance(aux_data, dict) else 'not a dict'}")
-    
+    logging.info(
+        f"[AUX TRANSCRIPT] Aux data keys: "
+        f"{list(aux_data.keys()) if isinstance(aux_data, dict) else 'not a dict'}"
+    )
+
     content = extract_aux_transcript_content(aux_data)
-    title = aux_data.get("title", "Aux Meeting")
-    
+    title = (
+        aux_data.get("title", _row_get(meeting_row, "title", "Aux Meeting"))
+        if isinstance(aux_data, dict)
+        else _row_get(meeting_row, "title", "Aux Meeting")
+    )
+
+    transcript_url = None
+    if isinstance(aux_data, dict):
+        transcript_obj = aux_data.get("transcript")
+        if isinstance(transcript_obj, dict):
+            transcript_id = transcript_obj.get("id")
+            transcript_file = transcript_obj.get("filename")
+            if transcript_id:
+                transcript_url = f"aux_transcript_id:{transcript_id}"
+            if transcript_file:
+                transcript_url = (
+                    f"{transcript_url} ({transcript_file})"
+                    if transcript_url
+                    else f"aux_transcript_file:{transcript_file}"
+                )
+
     logging.info(f"[AUX TRANSCRIPT] Transcript title: {title}")
     logging.info(f"[AUX TRANSCRIPT] Transcript content length: {len(content) if content else 0} chars")
-    
+
     if not content:
         logging.warning(f"[AUX TRANSCRIPT] No transcript content for Aux meeting {meeting_id}")
         return False
-    
-    logging.info(f"[AUX TRANSCRIPT] Calling process_transcript_data()...")
-    res = process_transcript_data(meeting_row, content, title, source="aux_api")
+
+    logging.info("[AUX TRANSCRIPT] Calling process_transcript_data()...")
+    res = process_transcript_data(
+        meeting_row,
+        content,
+        title,
+        source="aux_api",
+        transcript_url=transcript_url
+    )
     success = res.get("status") == "processed"
     logging.info(f"[AUX TRANSCRIPT] Processing result: {success}, full response: {res}")
     logging.info("=" * 60)
@@ -649,107 +709,121 @@ def process_transcript_data(meeting_row, transcript_content, title, source, tran
     """
     Core logic to parse, store, analyze and notify regarding a transcript.
     """
-    meeting_id = meeting_row['id']
+    meeting_id = _row_get(meeting_row, "id")
     logging.info("=" * 60)
     logging.info(f"[TRANSCRIPT DATA] Processing transcript for meeting {meeting_id} from {source}")
     logging.info(f"[TRANSCRIPT DATA] Meeting title: {title}")
     logging.info(f"[TRANSCRIPT DATA] Content length: {len(transcript_content) if transcript_content else 0} chars")
     logging.info(f"[TRANSCRIPT DATA] Transcript URL: {transcript_url}")
-    
-    # 1. Parse
-    logging.info(f"[TRANSCRIPT DATA] Step 1: Parsing transcript...")
+
+    logging.info("[TRANSCRIPT DATA] Step 1: Parsing transcript...")
     lines = transcript_service.parse_transcript(transcript_content)
     logging.info(f"[TRANSCRIPT DATA] Parsed {len(lines)} lines")
-    if lines:
-        logging.info(f"[TRANSCRIPT DATA] First 3 lines: {lines[:3]}")
-    
-    # 2. Store
-    logging.info(f"[TRANSCRIPT DATA] Step 2: Storing transcript to DB...")
+
+    logging.info("[TRANSCRIPT DATA] Step 2: Storing transcript to DB...")
     transcript_service.store_transcript(meeting_id, lines, source=source)
-    logging.info(f"[TRANSCRIPT DATA] Stored {len(lines)} lines of transcript for meeting {meeting_id}")
-    
-    # 3. Analyze (SAFE AI CALL)
-    logging.info(f"[TRANSCRIPT DATA] Step 3: Generating AI analysis...")
+    logging.info(f"[TRANSCRIPT DATA] Stored {len(lines)} transcript lines for meeting {meeting_id}")
+
+    logging.info("[TRANSCRIPT DATA] Step 3: Generating AI analysis...")
     full_text = transcript_service.get_full_transcript_text(lines)
     logging.info(f"[TRANSCRIPT DATA] Full text length for AI: {len(full_text)} chars")
-    
+
     analysis = None
+    fallback_analysis = False
     try:
         analysis = ai_service.generate_post_meeting_analysis(full_text)
-        logging.info(f"[TRANSCRIPT DATA] AI analysis generated successfully")
-        logging.info(f"[TRANSCRIPT DATA] Analysis keys: {list(analysis.keys()) if isinstance(analysis, dict) else 'not a dict'}")
+        logging.info("[TRANSCRIPT DATA] AI analysis generated successfully")
     except Exception as e:
         logging.error(f"[TRANSCRIPT DATA] Post-meeting AI analysis failed for meeting {meeting_id}: {e}")
         import traceback
         logging.error(f"[TRANSCRIPT DATA] Traceback: {traceback.format_exc()}")
 
-    # 4. Notify
-    phone = meeting_row['salesperson_phone']
+    if not isinstance(analysis, dict):
+        analysis = {
+            "objections": [],
+            "buying_signals": [],
+            "risks": [],
+            "follow_up_actions": ["Review transcript and send follow-up to the client."]
+        }
+        fallback_analysis = True
+        logging.warning(f"[TRANSCRIPT DATA] Using fallback post-meeting analysis for meeting {meeting_id}")
+
+    meeting_summary = _build_meeting_summary_from_lines(lines)
+    try:
+        db.execute_query(
+            "UPDATE meetings SET summary = ? WHERE id = ?",
+            (meeting_summary, meeting_id),
+            commit=True
+        )
+    except Exception as e:
+        logging.warning(f"[TRANSCRIPT DATA] Could not update meeting summary for meeting {meeting_id}: {e}")
+
+    phone = _row_get(meeting_row, "salesperson_phone")
     logging.info(f"[TRANSCRIPT DATA] Step 4: Notification - salesperson_phone: {phone}")
-    
-    if phone and analysis:
+    if phone:
         try:
-            # Format Report
-            objections = "\n".join([f"• \"{o['quote']}\"" for o in analysis.get('objections', [])]) or "None detected."
-            next_steps = "\n".join([f"• {s}" for s in analysis.get('follow_up_actions', [])])
-            
-            logging.info(f"[TRANSCRIPT DATA] Buying signals: {len(analysis.get('buying_signals', []))}")
-            logging.info(f"[TRANSCRIPT DATA] Risks: {len(analysis.get('risks', []))}")
-            logging.info(f"[TRANSCRIPT DATA] Follow-up actions: {len(analysis.get('follow_up_actions', []))}")
-            
+            objections = "\n".join(
+                [f"- \"{o['quote']}\"" for o in analysis.get("objections", []) if isinstance(o, dict) and o.get("quote")]
+            ) or "None detected."
+            next_steps = "\n".join([f"- {s}" for s in analysis.get("follow_up_actions", [])]) or "- Share recap and define next actions."
+
+            header = "Post-Meeting Coaching"
+            if fallback_analysis:
+                header += " (Transcript captured, AI summary fallback)"
+
             template_vars = {
-                "1": f"🧠 *Post-Meeting Analysis ({title})*",
-                "2": f"ðŸ›‘ *Objections*:\n{objections}\n\n📝ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
-                "3": f"âš ï¸ *Risks*: {len(analysis.get('risks', []))} identified\n\nðŸš€ *Next Steps*:\n{next_steps}",
-                "4": "ðŸ‘‰ Reply *Done* after you have followed up."
+                "1": f"*{header} ({title})*",
+                "2": f"*Objections*:\n{objections}\n\n*Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
+                "3": f"*Risks*: {len(analysis.get('risks', []))} identified\n\n*Next Steps*:\n{next_steps}",
+                "4": "Reply *Done* after you complete follow-up."
             }
-            
+
             msg_body = (
-                f"🧠 *Post-Meeting Analysis ({title})*\n\n"
-                f"ðŸ›‘ *Objections*:\n{objections}\n\n"
-                f"📝ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
-                f"âš ï¸ *Risks*: {len(analysis.get('risks', []))} identified\n\n"
-                f"ðŸš€ *Next Steps*:\n{next_steps}\n\n"
-                f"ðŸ‘‰ Reply *Done* after you have followed up."
+                f"*{header} ({title})*\n\n"
+                f"*Objections*:\n{objections}\n\n"
+                f"*Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
+                f"*Risks*: {len(analysis.get('risks', []))} identified\n\n"
+                f"*Next Steps*:\n{next_steps}\n\n"
+                f"Reply *Done* after you complete follow-up."
             )
-            
-            logging.info(f"[TRANSCRIPT DATA] Sending WhatsApp notification to {phone}")
             whatsapp_service.send_whatsapp_message(
                 phone,
                 body=msg_body,
                 use_template=True,
                 template_vars=template_vars
             )
-            logging.info(f"[TRANSCRIPT DATA] WhatsApp notification sent successfully")
+            logging.info(f"[TRANSCRIPT DATA] WhatsApp post-meeting coaching sent to {phone}")
         except Exception as notify_err:
             logging.error(f"[TRANSCRIPT DATA] Failed to send post-meeting notification: {notify_err}")
             import traceback
             logging.error(f"[TRANSCRIPT DATA] Notification traceback: {traceback.format_exc()}")
     else:
-        if not phone:
-            logging.warning(f"[TRANSCRIPT DATA] No salesperson_phone found, skipping notification")
-        if not analysis:
-            logging.warning(f"[TRANSCRIPT DATA] No AI analysis generated, skipping notification")
+        logging.warning("[TRANSCRIPT DATA] No salesperson_phone found, skipping notification")
 
-    # 5. Log to HubSpot (SAFE SYNC)
-    if analysis:
-        try:
-            logging.info(f"[TRANSCRIPT DATA] Step 5: Syncing to HubSpot...")
-            hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis'])
-            hubspot_service.sync_meeting_analysis(
-                client_db_id=meeting_row['client_id'],
-                meeting_title=title,
-                analysis=analysis,
-                transcript_url=transcript_url or "Stored in Database"
-            )
-            logging.info(f"[TRANSCRIPT DATA] HubSpot sync completed")
-        except Exception as e:
-            logging.error(f"[TRANSCRIPT DATA] HubSpot Analysis Sync Failed: {e}")
-            import traceback
-            logging.error(f"[TRANSCRIPT DATA] HubSpot traceback: {traceback.format_exc()}")
-    else:
-        logging.info(f"[TRANSCRIPT DATA] Skipping HubSpot sync (no analysis)")
-    
+    try:
+        logging.info("[TRANSCRIPT DATA] Step 5: Syncing summary and analysis to HubSpot...")
+        hs = __import__("services.hubspot_service", fromlist=["sync_meeting_analysis", "sync_meeting_summary"])
+        hs.sync_meeting_summary(
+            client_db_id=_row_get(meeting_row, "client_id"),
+            meeting_title=title,
+            start_time=str(_row_get(meeting_row, "start_time", "")),
+            summary=meeting_summary,
+            location=str(_row_get(meeting_row, "location", ""))
+        )
+        hs.sync_meeting_analysis(
+            client_db_id=_row_get(meeting_row, "client_id"),
+            meeting_title=title,
+            analysis=analysis,
+            transcript_url=transcript_url or "Stored in database",
+            meeting_summary=meeting_summary
+        )
+        logging.info("[TRANSCRIPT DATA] HubSpot sync completed")
+    except Exception as e:
+        logging.error(f"[TRANSCRIPT DATA] HubSpot sync failed: {e}")
+        import traceback
+        logging.error(f"[TRANSCRIPT DATA] HubSpot traceback: {traceback.format_exc()}")
+
     logging.info(f"[TRANSCRIPT DATA] Processing complete for meeting {meeting_id}")
     logging.info("=" * 60)
     return {"status": "processed", "meeting_id": meeting_id}
+
