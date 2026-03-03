@@ -231,68 +231,48 @@ def sync_note_to_contact(client_db_id: int, note_body: str):
         if not success:
             _create_ticket(hs_id, subject, note_body, priority="LOW")
 
-def sync_meeting_analysis(
-    client_db_id: int,
-    meeting_title: str,
-    analysis: dict,
-    transcript_url: str,
-    meeting_summary: str = ""
-):
+def sync_meeting_analysis(client_db_id: int, meeting_title: str, analysis: dict, transcript_url: str):
     """
-    Syncs post-meeting analysis (plus transcript and summary) to HubSpot.
+    Syncs the Post-Meeting Analysis and Transcript URL to HubSpot as a Ticket.
     """
-    row = db.execute_query(
-        "SELECT email, hubspot_contact_id, name FROM clients WHERE id = ?",
-        (client_db_id,),
-        fetch_one=True
-    )
+    # Get Client Data
+    row = db.execute_query("SELECT email, hubspot_contact_id, name FROM clients WHERE id = ?", (client_db_id,), fetch_one=True)
     if not row:
         logging.warning(f"Analysis Sync: Client {client_db_id} not found in DB.")
         return
 
-    email = row["email"]
-    hs_id = row["hubspot_contact_id"]
-
+    email = row['email']
+    hs_id = row['hubspot_contact_id']
+    
+    # Just in case ID is missing but we have Email
     if not hs_id and email:
-        hs_id = create_or_find_contact(email, row["name"] or "Client", "")
+        hs_id = create_or_find_contact(email, row['name'] or "Client", "")
         if hs_id:
-            db.execute_query(
-                "UPDATE clients SET hubspot_contact_id = ? WHERE id = ?",
-                (hs_id, client_db_id),
-                commit=True
-            )
-
+             db.execute_query("UPDATE clients SET hubspot_contact_id = ? WHERE id = ?", (hs_id, client_db_id), commit=True)
+    
     if not hs_id:
         logging.warning(f"Analysis Sync: No HubSpot ID for Client {client_db_id} ({email})")
         return
 
-    objections = "\n".join(
-        [
-            f"- {o.get('quote', '')} (Context: {o.get('context','')})"
-            for o in analysis.get("objections", [])
-            if isinstance(o, dict) and o.get("quote")
-        ]
-    )
-    buying_signals = "\n".join([f"- {s}" for s in analysis.get("buying_signals", [])])
-    risks = "\n".join([f"- {r}" for r in analysis.get("risks", [])])
-    next_steps = "\n".join([f"- {n}" for n in analysis.get("follow_up_actions", [])])
-
-    summary_block = ""
-    if meeting_summary:
-        summary_block = f"**Meeting Summary:**\n{meeting_summary}\n\n"
-
+    # Format Analysis
+    objections = "\n".join([f"- {o['quote']} (Context: {o.get('context','')})" for o in analysis.get('objections', [])])
+    buying_signals = "\n".join([f"- {s}" for s in analysis.get('buying_signals', [])])
+    risks = "\n".join([f"- {r}" for r in analysis.get('risks', [])])
+    next_steps = "\n".join([f"- {n}" for n in analysis.get('follow_up_actions', [])])
+    
     content = (
-        f"AI Meeting Analysis\n\n"
+        f"🧠 **AI Meeting Analysis**\n\n"
         f"**Meeting**: {meeting_title}\n"
         f"**Transcript**: {transcript_url}\n\n"
-        f"{summary_block}"
-        f"**Objections**:\n{objections if objections else 'None registered'}\n\n"
-        f"**Buying Signals**:\n{buying_signals if buying_signals else 'None registered'}\n\n"
-        f"**Risks**:\n{risks if risks else 'None registered'}\n\n"
-        f"**Recommended Next Steps**:\n{next_steps if next_steps else 'None registered'}"
+        f"🛑 **Objections**:\n{objections if objections else 'None registered'}\n\n"
+        f"📈 **Buying Signals**:\n{buying_signals if buying_signals else 'None registered'}\n\n"
+        f"⚠️ **Risks**:\n{risks if risks else 'None registered'}\n\n"
+        f"🚀 **Recommended Next Steps**:\n{next_steps if next_steps else 'None registered'}"
     )
-
+    
     subject = f"Meeting Analysis: {meeting_title}"
+    
+    # Try Note first
     success = _create_note(hs_id, content)
     if not success:
         return _create_ticket(hs_id, subject, content, priority="HIGH")
@@ -358,5 +338,4 @@ def sync_meeting_summary(client_db_id: int, meeting_title: str, start_time: str,
         if not success:
             return _create_ticket(hs_id, subject, content, priority="LOW")
         return True
-
 

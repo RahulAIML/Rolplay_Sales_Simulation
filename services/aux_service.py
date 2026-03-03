@@ -17,8 +17,12 @@ def schedule_meeting(meeting_link, scheduled_time, title, attendee_name="Rolplay
     payload = {
         "meetingLink": meeting_link,
         "scheduledTime": scheduled_time,
+        # Backward/forward compatibility with AUX API payload variants
+        "meeting_link": meeting_link,
+        "scheduled_time": scheduled_time,
         "title": title,
-        "attendeeName": attendee_name
+        "attendeeName": attendee_name,
+        "attendee_name": attendee_name
     }
     
     urls = [f"{AUX_BASE_URL}/meetings/schedule"]
