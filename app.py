@@ -150,9 +150,9 @@ def register():
         
         # Get bot email address from environment
         bot_email = os.getenv("BOT_EMAIL_SECONDARY", "bhattacharyabuddhadeb@outlook.com")
-        msg = (f"🎉 Welcome Coachlink 360! You are registered.\n\n"
-               f"To receive coaching, invite the bot account to your meetings:\n"
-               f"• {bot_email}")
+        msg = ("Welcome to Coachlink 360. You are registered.\n\n"
+               "To receive coaching, invite the bot account to your meetings:\n"
+               f"- {bot_email}")
         whatsapp_service.send_whatsapp_message(phone, msg)
         
         return f"<h1>Success!</h1><p>{name} registered with timezone {user_timezone}. Check WhatsApp!</p>"
@@ -355,9 +355,9 @@ def ingest_raw_meeting():
                 target_phone = user['phone']
 
         if target_phone:
-            strengths = "\n".join([f"✅ {s}" for s in coaching_json.get("strengths", [])[:2]])
-            weaknesses = "\n".join([f"⚠️ {w}" for w in coaching_json.get("weaknesses", [])[:2]])
-            tips = "\n".join([f"💡 {t}" for t in coaching_json.get("recommended_actions", [])[:2]])
+            strengths = "\n".join([f"- {s}" for s in coaching_json.get("strengths", [])[:2]])
+            weaknesses = "\n".join([f"- {w}" for w in coaching_json.get("weaknesses", [])[:2]])
+            tips = "\n".join([f"- {t}" for t in coaching_json.get("recommended_actions", [])[:2]])
             
             # Format Title (Hide ID if fallback/demo)
             title_suffix = ""
@@ -365,11 +365,11 @@ def ingest_raw_meeting():
                 title_suffix = f" ({session_id})"
             
             msg = (
-                f"🚀 *Post-Meeting Coaching{title_suffix}*\n\n"
+                f"*Post-Meeting Coaching{title_suffix}*\n\n"
                 f"*Strengths*:\n{strengths}\n\n"
                 f"*Improvements*:\n{weaknesses}\n\n"
                 f"*Action Plan*:\n{tips}\n\n"
-                f"👉 Reply *Done* to log this to HubSpot."
+                "Reply *Done* to log this to HubSpot."
             )
             whatsapp_service.send_whatsapp_message(target_phone, msg)
             logging.info(f"Sent raw ingest coaching to {target_phone}")

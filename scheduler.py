@@ -2,7 +2,6 @@ import os
 import atexit
 import logging
 from datetime import datetime, timedelta
-import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import db
@@ -38,10 +37,10 @@ def check_pending_meetings():
     logging.info(f"[SCHEDULER] check_pending_meetings() started at {now_utc}")
     
     meetings = db.execute_query(
-        "SELECT * FROM meetings WHERE status IN ('scheduled', 'reminder_sent')",
+        "SELECT * FROM meetings WHERE status IN ('scheduled', 'reminder_sent', 'completed') AND COALESCE(survey_status, 'pending') != 'sent'",
         fetch_all=True
     ) or []
-    logging.info(f"[SCHEDULER] Found {len(meetings)} meetings with status in ('scheduled','reminder_sent')")
+    logging.info(f"[SCHEDULER] Found {len(meetings)} meetings pending survey with status in ('scheduled','reminder_sent','completed')")
     
     for m in meetings:
         try:
@@ -95,18 +94,35 @@ def check_pending_meetings():
                 # Trigger Survey Webhook (retryable until sent)
                 if survey_status != "sent":
                     try:
+                        participant_email = client_email or sp_email
                         webhook_payload = {
                             "meeting_id": meeting_id,
+                            "meetingId": meeting_id,
                             "aux_meeting_id": m['aux_meeting_id'],
+                            "auxMeetingId": m['aux_meeting_id'],
                             "title": _row_get(m, 'title', 'Sales Meeting'),
+                            "meeting_title": _row_get(m, 'title', 'Sales Meeting'),
                             "organizer_email": sp_email,
+                            "organizerEmail": sp_email,
                             "client_email": client_email,
+                            "clientEmail": client_email,
+                            "participant_email": participant_email,
+                            "participant_name": cname,
+                            "session_id": str(_row_get(m, 'aux_meeting_id') or meeting_id),
                             "client_name": cname,
                             "status": "finished"
                         }
                         logging.info(f"[SCHEDULER] Triggering survey webhook for meeting {meeting_id}")
                         survey_result = aux_service.trigger_survey_webhook(webhook_payload)
-                        if survey_result:
+                        survey_ok = False
+                        if isinstance(survey_result, dict):
+                            survey_ok = bool(survey_result.get("success")) or str(survey_result.get("status", "")).strip().lower() in {
+                                "success", "sent", "queued", "accepted", "ok"
+                            }
+                        elif survey_result is True:
+                            survey_ok = True
+
+                        if survey_ok:
                             db.execute_query(
                                 "UPDATE meetings SET survey_status = 'sent' WHERE id = ?",
                                 (meeting_id,),
@@ -119,7 +135,7 @@ def check_pending_meetings():
                                 (meeting_id,),
                                 commit=True
                             )
-                            logging.warning(f"[SCHEDULER] Survey webhook trigger returned no result for meeting {meeting_id}")
+                            logging.warning(f"[SCHEDULER] Survey webhook trigger unsuccessful for meeting {meeting_id}. Response: {survey_result}")
                     except Exception as e:
                         db.execute_query(
                             "UPDATE meetings SET survey_status = 'failed' WHERE id = ?",
@@ -130,7 +146,7 @@ def check_pending_meetings():
 
                 # Send WhatsApp reminder only once (when transitioning from scheduled)
                 if current_status == "scheduled":
-                    msg = f"ðŸ”” Meeting with {cname} finished. How did it go? (Reply 'Done' to log to HubSpot)"
+                    msg = f"Meeting with {cname} finished. How did it go? (Reply 'Done' to log to HubSpot)"
                     logging.info(f"[SCHEDULER] Sending WhatsApp reminder to {target_phone}")
                     whatsapp_service.send_whatsapp_message(target_phone, msg)
                     
@@ -143,7 +159,7 @@ def check_pending_meetings():
         except Exception as e:
             logging.error(f"[SCHEDULER] ERROR processing meeting {_row_get(m, 'id')}: {e}")
             import traceback
-            logging.error(f"[SCHEDULER] Traceback: {traceback.format_exc}")
+            logging.error(f"[SCHEDULER] Traceback: {traceback.format_exc()}")
     
     # 2. POLL AUX API FOR TRANSCRIPTS
     # Find meetings that have an Aux token but aren't fully processed yet.
@@ -267,3 +283,4 @@ def start_scheduler():
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
     logging.info("[SCHEDULER] Scheduler started successfully")
+

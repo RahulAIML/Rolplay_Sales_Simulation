@@ -312,7 +312,8 @@ def process_outlook_webhook(data: dict) -> dict:
         try:
             body_json = json.loads(body_raw)
             body_raw = body_json.get("content") or body_json.get("Content") or body_raw
-        except: pass
+        except Exception:
+            pass
 
     if isinstance(body_raw, dict):
         meeting_body = body_raw.get("content") or body_raw.get("Content") or body_raw.get("body") or ""
@@ -345,15 +346,41 @@ def process_outlook_webhook(data: dict) -> dict:
     display_time = _local_start.strftime('%b %d, %I:%M %p %Z')
     mtg_title = _get_val(meeting_raw, ["title", "subject"], "Sales Meeting")
 
+    # Secondary dedupe for unstable/missing event IDs:
+    # treat same salesperson+title+time window as the same meeting.
+    if not is_retry:
+        similar_meetings = db.execute_query(
+            "SELECT id, outlook_event_id, aux_meeting_token, status, start_time FROM meetings WHERE salesperson_phone = ? AND title = ? ORDER BY id DESC LIMIT 15",
+            (sp_phone, mtg_title),
+            fetch_all=True
+        ) or []
+        for cand in similar_meetings:
+            cand_start = cand.get("start_time") if isinstance(cand, dict) else None
+            if not cand_start:
+                continue
+            try:
+                cand_dt = parse_iso_datetime(cand_start)
+                if abs(cand_dt - start_dt) <= timedelta(minutes=5):
+                    existing_mtg = cand
+                    is_retry = True
+                    if (not mtg_id or str(mtg_id).startswith("gen_")) and cand.get("outlook_event_id"):
+                        mtg_id = cand.get("outlook_event_id")
+                    logging.info(
+                        f"[OUTLOOK WEBHOOK] Secondary dedupe matched existing meeting {cand.get('id')} "
+                        f"(status: {cand.get('status')}). Treating as retry."
+                    )
+                    break
+            except Exception:
+                continue
+
     # 7. SEND COACHING (Priority)
-    # Even if it's a retry, we'll try to send coaching again if it's been less than 1 hour since the last attempt
-    # or if the user specifically needs it. For now, we allow re-sending on retries to ensure delivery.
-    if is_retry:
-        logging.info(f"[OUTLOOK WEBHOOK] Retry detected - re-sending WhatsApp coaching to ensure delivery.")
-    
-    if False: # Placeholder for more complex skip logic if needed later
-        pass
-    else:
+    # Avoid duplicate pre-meeting coaching on duplicate webhooks/retries.
+    # Optional override:
+    #   ALLOW_PRE_COACHING_RETRY=true -> allows resend on retries.
+    allow_retry_coaching = str(os.getenv("ALLOW_PRE_COACHING_RETRY", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    should_send_pre_coaching = (not is_retry) or allow_retry_coaching
+
+    if should_send_pre_coaching:
         try:
             logging.info(f"[OUTLOOK WEBHOOK] Generating AI coaching for '{mtg_title}'...")
             coaching = ai_service.generate_coaching_plan(
@@ -367,18 +394,18 @@ def process_outlook_webhook(data: dict) -> dict:
             logging.info(f"[OUTLOOK WEBHOOK] AI Coaching Result: {coaching}")
             
             msg_body = (
-                f"🚀 *New Meeting: {mtg_title}*\n"
+                f"*New Meeting: {mtg_title}*\n"
                 f"{coaching.get('greeting')}\n\n"
-                f"🎯 *Scenario*: {coaching.get('scenario')}\n\n"
-                f"📋 *Prep Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", [])) + "\n\n"
-                f"💡 *Reply*: {coaching.get('recommended_reply')}"
+                f"*Scenario*: {coaching.get('scenario')}\n\n"
+                f"*Prep Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", [])) + "\n\n"
+                f"*Reply*: {coaching.get('recommended_reply')}"
             )
-            
+
             template_vars = {
-                "1": f"🚀 *{mtg_title}*",
-                "2": f"{coaching.get('greeting')}\n\n🎯 {coaching.get('scenario')}",
-                "3": f"📋 *Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", []))[:200],
-                "4": f"💡 {coaching.get('recommended_reply')}"
+                "1": f"*{mtg_title}*",
+                "2": f"{coaching.get('greeting')}\n\nScenario: {coaching.get('scenario')}",
+                "3": f"*Steps*:\n" + "\n".join(f"- {s}" for s in coaching.get("steps", []))[:200],
+                "4": f"Reply: {coaching.get('recommended_reply')}"
             }
             
             logging.info(f"[OUTLOOK WEBHOOK] Sending WhatsApp to {sp_phone}...")
@@ -386,6 +413,8 @@ def process_outlook_webhook(data: dict) -> dict:
             logging.info(f"[OUTLOOK WEBHOOK] WhatsApp SID: {wa_sid}")
         except Exception as e:
             logging.error(f"[OUTLOOK WEBHOOK] AI Coaching/WhatsApp failed: {e}")
+    else:
+        logging.info(f"[OUTLOOK WEBHOOK] Retry detected for {mtg_id}. Skipping duplicate pre-meeting coaching.")
 
     # 8. POST-COACHING TASKS (Save & Bot Join)
     end_str = _get_val(meeting_raw, ["end_time", "endDateTime", "end"])
@@ -409,7 +438,11 @@ def process_outlook_webhook(data: dict) -> dict:
     if not meeting_link:
         meeting_link = _extract_meeting_link(f"{location_str} {meeting_body}")
 
-    if meeting_link:
+    existing_aux_token = existing_mtg.get("aux_meeting_token") if isinstance(existing_mtg, dict) else None
+    allow_bot_reschedule = str(os.getenv("ALLOW_BOT_RESCHEDULE_ON_RETRY", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    should_schedule_bot = (not is_retry) or allow_bot_reschedule
+
+    if meeting_link and should_schedule_bot:
         logging.info(f"[BOT SCHEDULING] Meeting Link found: {meeting_link}")
         try:
             # Standardize on UTC for AUX API to avoid offset confusion
@@ -426,6 +459,11 @@ def process_outlook_webhook(data: dict) -> dict:
                 logging.error(f"[BOT SCHEDULING] FAILED for {mtg_id}")
         except Exception as e:
             logging.error(f"[BOT SCHEDULING] EXCEPTION: {e}")
+    elif meeting_link and not should_schedule_bot:
+        logging.info(
+            f"[BOT SCHEDULING] Skipped duplicate scheduling for {mtg_id} "
+            f"(retry={is_retry}, existing_token={'yes' if existing_aux_token else 'no'}, allow_reschedule={allow_bot_reschedule})"
+        )
     else:
         logging.warning(f"[BOT SCHEDULING] SKIPPED - No link for {mtg_id}")
 
@@ -455,10 +493,11 @@ def process_read_ai_webhook(data: dict):
                 # Notify
                 user = db.execute_query("SELECT name FROM clients WHERE id = ?", (m['client_id'],), fetch_one=True)
                 cname = user['name'] if user else "Client"
-                msg = f"📝 *Meeting Summary Ready ({cname})*\n\n{summary_text[:500]}...\n\n📗— {report_url}"
+                msg = f"*Meeting Summary Ready ({cname})*\n\n{summary_text[:500]}...\n\nReport: {report_url}"
                 whatsapp_service.send_whatsapp_message(m['salesperson_phone'], msg)
                 break
-        except Exception: continue
+        except Exception:
+            continue
 
 
 def handle_incoming_message(sender: str, message_body: str) -> str:
@@ -469,16 +508,7 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     - Triggers AI Chat for everything else.
     """
     sender = normalize_phone(sender)
-    
-    # Find active meeting for this sender
-    m = db.execute_query(
-        "SELECT * FROM meetings WHERE (salesperson_phone = ? OR REPLACE(salesperson_phone, 'whatsapp:', '') = REPLACE(?, 'whatsapp:', '')) AND status IN ('scheduled', 'reminder_sent') ORDER BY id DESC LIMIT 1",
-        (sender, sender),
-        fetch_one=True
-    )
-    
-    if not m:
-        return "No active meeting found pending feedback."
+    lowered_body = (message_body or "").strip().lower()
 
     def _mget(row, key, default=None):
         if row is None:
@@ -490,6 +520,42 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
             return default if val is None else val
         except Exception:
             return default
+    
+    # Find active meeting for this sender
+    m = db.execute_query(
+        "SELECT * FROM meetings WHERE (salesperson_phone = ? OR REPLACE(salesperson_phone, 'whatsapp:', '') = REPLACE(?, 'whatsapp:', '')) AND status IN ('scheduled', 'reminder_sent', 'pending') ORDER BY id DESC LIMIT 1",
+        (sender, sender),
+        fetch_one=True
+    )
+
+    is_done_command = ("done" in lowered_body or "completed" in lowered_body)
+    if not m:
+        # Allow delayed replies after scheduler has already marked the meeting completed.
+        completed_rows = db.execute_query(
+            "SELECT * FROM meetings WHERE (salesperson_phone = ? OR REPLACE(salesperson_phone, 'whatsapp:', '') = REPLACE(?, 'whatsapp:', '')) AND status = 'completed' ORDER BY id DESC LIMIT 10",
+            (sender, sender),
+            fetch_all=True
+        ) or []
+
+        if completed_rows:
+            if is_done_command:
+                m = completed_rows[0]
+            else:
+                now_utc = get_current_utc_time()
+                for row in completed_rows:
+                    ts = _mget(row, "end_time") or _mget(row, "start_time")
+                    if not ts:
+                        continue
+                    try:
+                        row_dt = parse_iso_datetime(ts)
+                        if now_utc - row_dt <= timedelta(hours=48):
+                            m = row
+                            break
+                    except Exception:
+                        continue
+    
+    if not m:
+        return "No active meeting found pending feedback."
 
     # Log Message
     db.execute_query(
@@ -499,12 +565,12 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     )
 
     # Command: DONE
-    if "done" in message_body.lower() or "completed" in message_body.lower():
+    if is_done_command:
         db.execute_query("UPDATE meetings SET status='completed' WHERE id=?", (m['id'],), commit=True)
         hubspot_service = __import__('services.hubspot_service', fromlist=['sync_note_to_contact'])
         hubspot_service.sync_note_to_contact(m['client_id'], f"Feedback: {message_body}")
         
-        return "âœ… Meeting marked as completed notes synced to CRM."
+        return "Meeting marked as completed. Notes synced to CRM."
     
     # Command: Chat (Default)
     # Get Context
@@ -531,7 +597,11 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
     # Look up salesperson's timezone for correct local time display
     sp_tz = None
     try:
-        sp_user = db.execute_query("SELECT timezone FROM users WHERE phone = ?", (sender,), fetch_one=True)
+        sp_user = db.execute_query(
+            "SELECT timezone FROM users WHERE phone = ? OR REPLACE(phone, 'whatsapp:', '') = REPLACE(?, 'whatsapp:', '') LIMIT 1",
+            (sender, sender),
+            fetch_one=True
+        )
         if sp_user:
             sp_tz = sp_user['timezone'] or None
     except Exception:
@@ -542,14 +612,14 @@ def handle_incoming_message(sender: str, message_body: str) -> str:
         s_dt = parse_iso_datetime(start) if start else None
         e_dt = parse_iso_datetime(end) if end else None
         if s_dt and e_dt:
-            # Use per-user timezone â€” falls back to APP_TIMEZONE then UTC
+            # Use per-user timezone; falls back to APP_TIMEZONE then UTC.
             s_local = to_local_time(s_dt, tz_str=sp_tz)
             e_local = to_local_time(e_dt, tz_str=sp_tz)
             tz_abbr = s_local.strftime("%Z")
             time_str = f"{s_local.strftime('%b %d, %I:%M %p')} - {e_local.strftime('%I:%M %p')} {tz_abbr}"
         else:
             time_str = "Unknown Time"
-    except:
+    except Exception:
         time_str = "Unknown Time"
         
     context += f"\nTime: {time_str}\nLocation: {loc}\nAttendees: {atts}"
@@ -610,7 +680,7 @@ def process_transcript_webhook(data: dict):
             if abs(m_dt - webhook_dt) <= timedelta(minutes=20):
                 matched_meeting = m
                 break
-        except:
+        except Exception:
             continue
             
     if not matched_meeting:
@@ -637,19 +707,32 @@ def process_aux_transcript(meeting_row, aux_data):
     logging.info("=" * 60)
     logging.info(f"[AUX TRANSCRIPT] process_aux_transcript() called for meeting {meeting_id}")
     logging.info(f"[AUX TRANSCRIPT] Aux data keys: {list(aux_data.keys()) if isinstance(aux_data, dict) else 'not a dict'}")
-    
+
     content = extract_aux_transcript_content(aux_data)
-    title = aux_data.get("title", "Aux Meeting")
-    
+    title = aux_data.get("title") if isinstance(aux_data, dict) else None
+    if not title:
+        title = meeting_row.get("title", "Aux Meeting") if isinstance(meeting_row, dict) else "Aux Meeting"
+
+    transcript_url = None
+    if isinstance(aux_data, dict):
+        t = aux_data.get("transcript")
+        if isinstance(t, dict):
+            tid = t.get("id")
+            fname = t.get("filename")
+            if tid:
+                transcript_url = f"aux_transcript_id:{tid}"
+            elif fname:
+                transcript_url = f"aux_transcript_file:{fname}"
+
     logging.info(f"[AUX TRANSCRIPT] Transcript title: {title}")
     logging.info(f"[AUX TRANSCRIPT] Transcript content length: {len(content) if content else 0} chars")
-    
+
     if not content:
         logging.warning(f"[AUX TRANSCRIPT] No transcript content for Aux meeting {meeting_id}")
         return False
-    
-    logging.info(f"[AUX TRANSCRIPT] Calling process_transcript_data()...")
-    res = process_transcript_data(meeting_row, content, title, source="aux_api")
+
+    logging.info("[AUX TRANSCRIPT] Calling process_transcript_data()...")
+    res = process_transcript_data(meeting_row, content, title, source="aux_api", transcript_url=transcript_url)
     success = res.get("status") == "processed"
     logging.info(f"[AUX TRANSCRIPT] Processing result: {success}, full response: {res}")
     logging.info("=" * 60)
@@ -666,101 +749,117 @@ def process_transcript_data(meeting_row, transcript_content, title, source, tran
     logging.info(f"[TRANSCRIPT DATA] Meeting title: {title}")
     logging.info(f"[TRANSCRIPT DATA] Content length: {len(transcript_content) if transcript_content else 0} chars")
     logging.info(f"[TRANSCRIPT DATA] Transcript URL: {transcript_url}")
-    
+
     # 1. Parse
-    logging.info(f"[TRANSCRIPT DATA] Step 1: Parsing transcript...")
+    logging.info("[TRANSCRIPT DATA] Step 1: Parsing transcript...")
     lines = transcript_service.parse_transcript(transcript_content)
     logging.info(f"[TRANSCRIPT DATA] Parsed {len(lines)} lines")
-    if lines:
-        logging.info(f"[TRANSCRIPT DATA] First 3 lines: {lines[:3]}")
-    
+
     # 2. Store
-    logging.info(f"[TRANSCRIPT DATA] Step 2: Storing transcript to DB...")
+    logging.info("[TRANSCRIPT DATA] Step 2: Storing transcript to DB...")
     transcript_service.store_transcript(meeting_id, lines, source=source)
     logging.info(f"[TRANSCRIPT DATA] Stored {len(lines)} lines of transcript for meeting {meeting_id}")
-    
-    # 3. Analyze (SAFE AI CALL)
-    logging.info(f"[TRANSCRIPT DATA] Step 3: Generating AI analysis...")
+
+    # 3. Analyze with safe fallback
+    logging.info("[TRANSCRIPT DATA] Step 3: Generating AI analysis...")
     full_text = transcript_service.get_full_transcript_text(lines)
     logging.info(f"[TRANSCRIPT DATA] Full text length for AI: {len(full_text)} chars")
-    
+
     analysis = None
     try:
         analysis = ai_service.generate_post_meeting_analysis(full_text)
-        logging.info(f"[TRANSCRIPT DATA] AI analysis generated successfully")
+        logging.info("[TRANSCRIPT DATA] AI analysis generated successfully")
         logging.info(f"[TRANSCRIPT DATA] Analysis keys: {list(analysis.keys()) if isinstance(analysis, dict) else 'not a dict'}")
     except Exception as e:
         logging.error(f"[TRANSCRIPT DATA] Post-meeting AI analysis failed for meeting {meeting_id}: {e}")
         import traceback
         logging.error(f"[TRANSCRIPT DATA] Traceback: {traceback.format_exc()}")
 
+    if not isinstance(analysis, dict):
+        analysis = {
+            "objections": [],
+            "buying_signals": [],
+            "risks": [],
+            "follow_up_actions": ["Review transcript and define next steps with the client."]
+        }
+
+    # Build a short summary snippet for CRM summary logging.
+    summary_excerpt = "\n".join([
+        f"{l.get('speaker', 'Speaker')}: {l.get('text', '')}" for l in lines[:8]
+    ]).strip()
+    if summary_excerpt:
+        summary_excerpt = summary_excerpt[:2000]
+
     # 4. Notify
     phone = meeting_row['salesperson_phone']
     logging.info(f"[TRANSCRIPT DATA] Step 4: Notification - salesperson_phone: {phone}")
-    
-    if phone and analysis:
+
+    if phone:
         try:
-            # Format Report
-            objections = "\n".join([f"• \"{o['quote']}\"" for o in analysis.get('objections', [])]) or "None detected."
-            next_steps = "\n".join([f"• {s}" for s in analysis.get('follow_up_actions', [])])
-            
-            logging.info(f"[TRANSCRIPT DATA] Buying signals: {len(analysis.get('buying_signals', []))}")
-            logging.info(f"[TRANSCRIPT DATA] Risks: {len(analysis.get('risks', []))}")
-            logging.info(f"[TRANSCRIPT DATA] Follow-up actions: {len(analysis.get('follow_up_actions', []))}")
-            
+            objections = "\n".join([
+                f"- \"{o.get('quote')}\"" for o in analysis.get('objections', [])
+                if isinstance(o, dict) and o.get('quote')
+            ]) or "None detected."
+            next_steps = "\n".join([f"- {s}" for s in analysis.get('follow_up_actions', [])]) or "- Follow up with the client."
+
             template_vars = {
-                "1": f"🧠 *Post-Meeting Analysis ({title})*",
-                "2": f"ðŸ›‘ *Objections*:\n{objections}\n\n📝ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected",
-                "3": f"âš ï¸ *Risks*: {len(analysis.get('risks', []))} identified\n\nðŸš€ *Next Steps*:\n{next_steps}",
-                "4": "ðŸ‘‰ Reply *Done* after you have followed up."
+                "1": f"Post-Meeting Analysis ({title})",
+                "2": f"Objections:\n{objections}\n\nBuying Signals: {len(analysis.get('buying_signals', []))} detected",
+                "3": f"Risks: {len(analysis.get('risks', []))} identified\n\nNext Steps:\n{next_steps}",
+                "4": "Reply *Done* after you have followed up."
             }
-            
+
             msg_body = (
-                f"🧠 *Post-Meeting Analysis ({title})*\n\n"
-                f"ðŸ›‘ *Objections*:\n{objections}\n\n"
-                f"📝ˆ *Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
-                f"âš ï¸ *Risks*: {len(analysis.get('risks', []))} identified\n\n"
-                f"ðŸš€ *Next Steps*:\n{next_steps}\n\n"
-                f"ðŸ‘‰ Reply *Done* after you have followed up."
+                f"*Post-Meeting Analysis ({title})*\n\n"
+                f"*Objections*:\n{objections}\n\n"
+                f"*Buying Signals*: {len(analysis.get('buying_signals', []))} detected\n"
+                f"*Risks*: {len(analysis.get('risks', []))} identified\n\n"
+                f"*Next Steps*:\n{next_steps}\n\n"
+                f"Reply *Done* after you have followed up."
             )
-            
-            logging.info(f"[TRANSCRIPT DATA] Sending WhatsApp notification to {phone}")
+
+            use_template = str(os.getenv("TWILIO_USE_POST_MEETING_TEMPLATE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            logging.info(f"[TRANSCRIPT DATA] Sending WhatsApp notification to {phone} (template={use_template})")
             whatsapp_service.send_whatsapp_message(
                 phone,
                 body=msg_body,
-                use_template=True,
-                template_vars=template_vars
+                use_template=use_template,
+                template_vars=template_vars if use_template else None
             )
-            logging.info(f"[TRANSCRIPT DATA] WhatsApp notification sent successfully")
+            logging.info("[TRANSCRIPT DATA] WhatsApp notification sent successfully")
         except Exception as notify_err:
             logging.error(f"[TRANSCRIPT DATA] Failed to send post-meeting notification: {notify_err}")
             import traceback
             logging.error(f"[TRANSCRIPT DATA] Notification traceback: {traceback.format_exc()}")
     else:
-        if not phone:
-            logging.warning(f"[TRANSCRIPT DATA] No salesperson_phone found, skipping notification")
-        if not analysis:
-            logging.warning(f"[TRANSCRIPT DATA] No AI analysis generated, skipping notification")
+        logging.warning("[TRANSCRIPT DATA] No salesperson_phone found, skipping notification")
 
-    # 5. Log to HubSpot (SAFE SYNC)
-    if analysis:
-        try:
-            logging.info(f"[TRANSCRIPT DATA] Step 5: Syncing to HubSpot...")
-            hubspot_service = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis'])
-            hubspot_service.sync_meeting_analysis(
+    # 5. Log to HubSpot (summary + analysis)
+    try:
+        hs = __import__('services.hubspot_service', fromlist=['sync_meeting_analysis', 'sync_meeting_summary'])
+        if summary_excerpt:
+            hs.sync_meeting_summary(
                 client_db_id=meeting_row['client_id'],
                 meeting_title=title,
-                analysis=analysis,
-                transcript_url=transcript_url or "Stored in Database"
+                start_time=str(meeting_row.get('start_time', '')) if isinstance(meeting_row, dict) else '',
+                summary=summary_excerpt,
+                location=str(meeting_row.get('location', '')) if isinstance(meeting_row, dict) else ''
             )
-            logging.info(f"[TRANSCRIPT DATA] HubSpot sync completed")
-        except Exception as e:
-            logging.error(f"[TRANSCRIPT DATA] HubSpot Analysis Sync Failed: {e}")
-            import traceback
-            logging.error(f"[TRANSCRIPT DATA] HubSpot traceback: {traceback.format_exc()}")
-    else:
-        logging.info(f"[TRANSCRIPT DATA] Skipping HubSpot sync (no analysis)")
-    
+
+        hs.sync_meeting_analysis(
+            client_db_id=meeting_row['client_id'],
+            meeting_title=title,
+            analysis=analysis,
+            transcript_url=transcript_url or "Stored in database"
+        )
+        logging.info("[TRANSCRIPT DATA] HubSpot sync completed")
+    except Exception as e:
+        logging.error(f"[TRANSCRIPT DATA] HubSpot Analysis Sync Failed: {e}")
+        import traceback
+        logging.error(f"[TRANSCRIPT DATA] HubSpot traceback: {traceback.format_exc()}")
+
     logging.info(f"[TRANSCRIPT DATA] Processing complete for meeting {meeting_id}")
     logging.info("=" * 60)
     return {"status": "processed", "meeting_id": meeting_id}
+
+
